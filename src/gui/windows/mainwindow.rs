@@ -527,43 +527,18 @@ impl eframe::App for MainWindow {
                             },
                         );
 
-                        // --- Separator handle (drawn on top, no extra allocation), only when expanded ---
+                        // --- Sidebar separator, only when expanded ---
+                        // Reserve the same layout space as before so the explorer column keeps
+                        // its position; the interactive handle itself is registered after the
+                        // explorer column (so it wins hit-testing) and is aligned with the
+                        // sidebar frame's visible right border rather than `sidebar_width`,
+                        // which is relative to the column and not to the window.
+                        const SIDEBAR_SEPARATOR_WIDTH: f32 = 6.0;
                         if !self.sidebar_collapsed {
-                            let separator_width = 6.0;
-                            let separator_rect = egui::Rect::from_min_size(
-                                egui::pos2(sidebar_width - separator_width / 2.0, 0.0),
-                                egui::vec2(separator_width, ui.available_height()),
-                            );
-
-                            let separator_response =
-                                ui.allocate_rect(separator_rect, egui::Sense::click_and_drag());
-
-                            if separator_response.hovered() || separator_response.dragged() {
-                                ui.ctx().set_cursor_icon(egui::CursorIcon::ResizeHorizontal);
-
-                                let handle_height = 25.0;
-                                let handle_width = 6.0;
-                                let center_y = ui.available_height() / 2.0;
-
-                                let handle_rect = egui::Rect::from_center_size(
-                                    egui::pos2(sidebar_width, center_y), // exactly on sidebar right edge
-                                    egui::vec2(handle_width, handle_height),
-                                );
-
-                                ui.painter().rect_filled(
-                                    handle_rect,
-                                    handle_width / 2.0,
-                                    palette.button_seperator_handle_fill,
-                                );
-                            }
-
-                            if separator_response.dragged() {
-                                self.sidebar_state.sidebar_default_width =
-                                    (self.sidebar_state.sidebar_default_width
-                                        + separator_response.drag_delta().x)
-                                        .max(sidebar_width_min)
-                                        .min(sidebar_width_max);
-                            }
+                            ui.advance_cursor_after_rect(egui::Rect::from_min_size(
+                                egui::pos2(sidebar_width - SIDEBAR_SEPARATOR_WIDTH / 2.0, 0.0),
+                                egui::vec2(SIDEBAR_SEPARATOR_WIDTH, ui.available_height()),
+                            ));
                         }
 
                         // --- Explorer column ---
@@ -1102,6 +1077,54 @@ impl eframe::App for MainWindow {
                             &mut self.tags_state,
                         ) {
                             tags_changed = true;
+                        }
+
+                        if let Some(frame_rect) = sidebar_frame_rect {
+                            // The frame stroke is painted inside its rect: the visible line
+                            // is the last pixel column of the frame.
+                            let line_x = frame_rect.right() - 0.5;
+                            let separator_rect = egui::Rect::from_min_max(
+                                egui::pos2(
+                                    line_x - SIDEBAR_SEPARATOR_WIDTH / 2.0,
+                                    frame_rect.top(),
+                                ),
+                                egui::pos2(
+                                    line_x + SIDEBAR_SEPARATOR_WIDTH / 2.0,
+                                    frame_rect.bottom(),
+                                ),
+                            );
+
+                            let separator_response = ui.interact(
+                                separator_rect,
+                                ui.id().with("sidebar_separator"),
+                                egui::Sense::click_and_drag(),
+                            );
+
+                            if separator_response.hovered() || separator_response.dragged() {
+                                ui.ctx().set_cursor_icon(egui::CursorIcon::ResizeHorizontal);
+
+                                let handle_height = 25.0;
+                                let handle_width = 6.0;
+
+                                let handle_rect = egui::Rect::from_center_size(
+                                    egui::pos2(line_x, frame_rect.center().y),
+                                    egui::vec2(handle_width, handle_height),
+                                );
+
+                                ui.painter().rect_filled(
+                                    handle_rect,
+                                    handle_width / 2.0,
+                                    palette.button_seperator_handle_fill,
+                                );
+                            }
+
+                            if separator_response.dragged() {
+                                self.sidebar_state.sidebar_default_width =
+                                    (self.sidebar_state.sidebar_default_width
+                                        + separator_response.drag_delta().x)
+                                        .max(sidebar_width_min)
+                                        .min(sidebar_width_max);
+                            }
                         }
 
                         if let Some(tags_action) = self.tags_state.pending_action.take() {
