@@ -249,7 +249,8 @@ fn parse_verb(buffer: &[u16]) -> Option<String> {
 
 /// What is needed to compute keys for the items of one menu level.
 struct LevelContext<'a> {
-    context_menu: &'a IContextMenu,
+    /// Verb source; `None` keys every entry by label (tests).
+    context_menu: Option<&'a IContextMenu>,
     id_base: u32,
     /// Labels of the enclosing submenus.
     parents: &'a [String],
@@ -271,7 +272,7 @@ fn level_keys(
             if !(level.id_base..=CONTEXT_MENU_ID_MAX).contains(&id) {
                 return None;
             }
-            command_verb(level.context_menu, id - level.id_base)
+            command_verb(level.context_menu?, id - level.id_base)
         })
         .collect();
     let mut verb_counts: HashMap<&str, u32> = HashMap::new();
@@ -462,7 +463,7 @@ impl MenuMsgHandler {
 /// (`WM_INITMENUPOPUP`). Items a shell extension adds later asynchronously
 /// are not seen (best effort).
 struct NativePruner {
-    context_menu: IContextMenu,
+    context_menu: Option<IContextMenu>,
     id_base: u32,
     hidden: HashSet<String>,
     /// Menus that may be pruned: HMENU -> (entry key, label path). The root
@@ -475,12 +476,21 @@ struct NativePruner {
 
 impl NativePruner {
     fn new(context_menu: IContextMenu, id_base: u32, root: HMENU) -> Self {
+        Self::with_hidden(Some(context_menu), id_base, root, hidden_set())
+    }
+
+    fn with_hidden(
+        context_menu: Option<IContextMenu>,
+        id_base: u32,
+        root: HMENU,
+        hidden: HashSet<String>,
+    ) -> Self {
         let mut menus = HashMap::new();
         menus.insert(root.0 as usize, (String::new(), Vec::new()));
         Self {
             context_menu,
             id_base,
-            hidden: hidden_set(),
+            hidden,
             menus: RefCell::new(menus),
             detached: RefCell::new(Vec::new()),
         }
@@ -508,7 +518,7 @@ impl NativePruner {
         }
 
         let level = LevelContext {
-            context_menu: &self.context_menu,
+            context_menu: self.context_menu.as_ref(),
             id_base: self.id_base,
             parents: &parents,
         };
@@ -750,7 +760,7 @@ impl ShellContextMenu {
 
         let mut stats = CollectStats::default();
         let level = LevelContext {
-            context_menu: &this.context_menu,
+            context_menu: Some(&this.context_menu),
             id_base: this.id_base,
             parents: &[],
         };
@@ -809,7 +819,7 @@ impl ShellContextMenu {
 
         let mut stats = CollectStats::default();
         let level = LevelContext {
-            context_menu: &self.context_menu,
+            context_menu: Some(&self.context_menu),
             id_base: self.id_base,
             parents: &submenu.path,
         };
@@ -982,16 +992,18 @@ impl ShellContextMenu {
         if crate::core::probe_active() {
             return Ok(());
         }
+        let mut point = windows::Win32::Foundation::POINT::default();
+        unsafe {
+            windows::Win32::UI::WindowsAndMessaging::GetCursorPos(&mut point)?;
+        }
+        // No early return between pruning and handing the detached submenus
+        // over to `self` (destroyed in `Drop`, after `invoke`).
         let pruner = Rc::new(NativePruner::new(
             self.context_menu.clone(),
             self.id_base,
             self.menu,
         ));
         pruner.prune(self.menu);
-        let mut point = windows::Win32::Foundation::POINT::default();
-        unsafe {
-            windows::Win32::UI::WindowsAndMessaging::GetCursorPos(&mut point)?;
-        }
         let command = {
             let _active = ActiveNativeMenuGuard::install(ActiveNativeMenu {
                 handler: self.handler.clone(),
@@ -1645,6 +1657,7 @@ fn crop_owner_drawn_icon(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use windows::Win32::UI::WindowsAndMessaging::GetSubMenu;
 
     #[test]
     fn sanitize_label_strips_mnemonics() {
@@ -1730,6 +1743,94 @@ mod tests {
         let mut px = vec![200, 0, 0, 100];
         bgra_to_straight_rgba(&mut px, true);
         assert_eq!(px, vec![0, 0, 200, 100]);
+    }
+
+    /// Builds a native menu from `(label, kind)`; kind: 'c' command,
+    /// 's' submenu (with one child), '-' separator.
+    fn native_menu(items: &[(&str, char)]) -> HMENU {
+        use windows::Win32::UI::WindowsAndMessaging::{
+            AppendMenuW, MF_POPUP, MF_SEPARATOR, MF_STRING,
+        };
+        let wide = |s: &str| s.encode_utf16().chain(Some(0)).collect::<Vec<u16>>();
+        unsafe {
+            let menu = CreatePopupMenu().unwrap();
+            for (index, (label, kind)) in items.iter().enumerate() {
+                let text = wide(label);
+                match kind {
+                    '-' => AppendMenuW(menu, MF_SEPARATOR, 0, PCWSTR::null()).unwrap(),
+                    's' => {
+                        let sub = CreatePopupMenu().unwrap();
+                        let child = wide("child");
+                        AppendMenuW(sub, MF_STRING, 900, PCWSTR(child.as_ptr())).unwrap();
+                        AppendMenuW(menu, MF_POPUP, sub.0 as usize, PCWSTR(text.as_ptr())).unwrap();
+                    }
+                    _ => AppendMenuW(menu, MF_STRING, index + 1, PCWSTR(text.as_ptr())).unwrap(),
+                }
+            }
+            menu
+        }
+    }
+
+    fn native_labels(menu: HMENU) -> Vec<String> {
+        let mut buffer = Vec::new();
+        (0..unsafe { GetMenuItemCount(Some(menu)) } as u32)
+            .map(|index| {
+                let item = read_menu_item(menu, index, MIIM_FTYPE, &mut buffer).unwrap();
+                if item.info.fType.contains(MFT_SEPARATOR) {
+                    "-".to_string()
+                } else {
+                    item.label
+                }
+            })
+            .collect()
+    }
+
+    #[test]
+    fn native_pruning_removes_hidden_entries() {
+        use windows::Win32::UI::WindowsAndMessaging::IsMenu;
+        let menu = native_menu(&[
+            ("-", '-'),
+            ("Open", 'c'),
+            ("-", '-'),
+            ("&Hide A", 'c'),
+            ("Hide B", 'c'),
+            ("-", '-'),
+            ("Send to", 's'),
+            ("-", '-'),
+            ("Keep", 's'),
+            ("Properties", 'c'),
+            ("-", '-'),
+            ("Hide C", 'c'),
+        ]);
+        let send_to = unsafe { GetSubMenu(menu, 6) };
+        let hidden: HashSet<String> = [
+            "label:Hide A",
+            "label:Hide B",
+            "label:Send to",
+            "label:Hide C",
+        ]
+        .into_iter()
+        .map(String::from)
+        .collect();
+        let pruner = NativePruner::with_hidden(None, CONTEXT_MENU_ID_BASE, menu, hidden);
+        pruner.prune(menu);
+
+        assert_eq!(native_labels(menu), vec!["Open", "-", "Keep", "Properties"]);
+        // The hidden submenu is detached, not destroyed (the shell may still
+        // reference it); the visible one can be pruned on WM_INITMENUPOPUP.
+        let detached = pruner.detached.borrow().clone();
+        assert_eq!(detached, vec![send_to]);
+        assert!(unsafe { IsMenu(send_to) }.as_bool());
+        let keep = unsafe { GetSubMenu(menu, 2) };
+        assert!(pruner.menus.borrow().contains_key(&(keep.0 as usize)));
+
+        unsafe {
+            DestroyMenu(menu).unwrap();
+            for submenu in detached {
+                DestroyMenu(submenu).unwrap();
+                assert!(!IsMenu(submenu).as_bool());
+            }
+        }
     }
 
     #[test]
