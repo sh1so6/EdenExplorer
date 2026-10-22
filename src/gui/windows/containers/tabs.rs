@@ -1,8 +1,10 @@
 use crate::core::fs::{MY_PC_PATH, MY_RECYCLE_BIN_PATH};
+use crate::core::utils::text::apply_eden_text_overrides;
+use crate::core::utils::widgets::apply_eden_visual_overrides;
 use crate::gui::i18n::I18n;
 use crate::gui::theme::ThemePalette;
 use crate::gui::utils::truncate_item_text;
-use crate::gui::windows::containers::structs::{TabInfo, TabsAction};
+use crate::gui::windows::containers::structs::{TabContextAction, TabInfo, TabsAction};
 use crate::gui::windows::windowsoverrides::toggle_window_fullscreen;
 use eframe::egui;
 use egui::{FontFamily, FontId};
@@ -21,8 +23,11 @@ pub const VERTICAL_TABS_MAX_WIDTH: f32 = 400.0;
 pub const VERTICAL_TABS_DEFAULT_WIDTH: f32 = 200.0;
 const VERTICAL_TAB_ROW_HEIGHT: f32 = 30.0;
 const VERTICAL_TABS_HEADER_HEIGHT: f32 = 28.0;
-/// Gap between the rail edges and its rows/button (inactive rows keep it on the right too).
+/// Gap between the rail's top/bottom edges and its rows/button; inactive rows and the
+/// button also keep it clear of the right divider.
 const VERTICAL_TABS_INSET: f32 = 6.0;
+/// Gap between the rail's left edge (the sidebar border / resize handle) and the rows.
+const VERTICAL_TABS_LEFT_INSET: f32 = 3.0;
 /// Horizontal padding inside a row before the icon (leaves room for the active accent bar).
 const VERTICAL_TAB_ROW_PADDING: f32 = 10.0;
 /// How far the rail background moves from the app background towards the text color.
@@ -224,7 +229,7 @@ pub fn draw_tabs(
                         .scroll_offset(egui::vec2(effective_scroll_offset, 0.0))
                         .show(ui, |ui| {
                             ui.horizontal(|ui| {
-                                for tab in tabs {
+                                for (index, tab) in tabs.iter().enumerate() {
                                     let (rect, resp) = ui.allocate_exact_size(
                                         egui::vec2(tab_width, TAB_HEIGHT),
                                         egui::Sense::click(),
@@ -257,7 +262,8 @@ pub fn draw_tabs(
                                     handle_draw_tab_new_allocated(
                                         ui,
                                         i18n,
-                                        tab,
+                                        tabs,
+                                        index,
                                         rect,
                                         resp.clone(),
                                         active_id,
@@ -374,7 +380,7 @@ pub fn draw_vertical_tabs(
     // last stretch, inactive rows keep `VERTICAL_TABS_INSET` clear of it.
     let content_rect = egui::Rect::from_min_max(
         egui::pos2(
-            inner_left + VERTICAL_TABS_INSET,
+            inner_left + VERTICAL_TABS_LEFT_INSET,
             panel_rect.top() + 1.0 + VERTICAL_TABS_INSET,
         ),
         panel_rect.max - egui::vec2(0.0, VERTICAL_TABS_INSET),
@@ -399,7 +405,7 @@ pub fn draw_vertical_tabs(
                 .auto_shrink([false, false])
                 .show(ui, |ui| {
                     ui.spacing_mut().item_spacing.y = 2.0;
-                    for tab in tabs {
+                    for (index, tab) in tabs.iter().enumerate() {
                         let (rect, resp) = ui.allocate_exact_size(
                             egui::vec2(ui.available_width(), VERTICAL_TAB_ROW_HEIGHT),
                             egui::Sense::click(),
@@ -422,7 +428,8 @@ pub fn draw_vertical_tabs(
                         handle_draw_vertical_tab_row(
                             ui,
                             i18n,
-                            tab,
+                            tabs,
+                            index,
                             rect,
                             resp,
                             active_id,
@@ -521,11 +528,14 @@ fn handle_draw_vertical_new_tab_button(
     }
 }
 
-/// Draws one row of the vertical tab rail. `rect` spans up to the rail's right divider.
+/// Draws one row of the vertical tab rail (`tabs[index]`). `rect` spans up to the rail's
+/// right divider. Rows have no close button; tabs close via middle-click or the row's
+/// context menu.
 fn handle_draw_vertical_tab_row(
     ui: &mut egui::Ui,
     i18n: &I18n,
-    tab: &TabInfo,
+    tabs: &[TabInfo],
+    index: usize,
     rect: egui::Rect,
     resp: egui::Response,
     active_id: u64,
@@ -533,13 +543,16 @@ fn handle_draw_vertical_tab_row(
     palette: &ThemePalette,
     action: &mut TabsAction,
 ) {
+    let tab = &tabs[index];
     let is_active = tab.id == active_id;
     let rect = egui::Rect::from_min_max(rect.min.round(), rect.max.round());
-    // Inactive rows (and every row's text/close button) stay clear of the divider; only the
-    // active row's background runs into it.
+    // Inactive rows (and every row's text) stay clear of the divider; only the active row's
+    // background runs into it.
     let item_rect = rect.with_max_x(rect.right() - VERTICAL_TABS_INSET);
-    // Includes hovering the pin/close buttons, which sit on top of the row response.
-    let row_hovered = ui.rect_contains_pointer(rect);
+    // Includes hovering the pin button, which sits on top of the row response. A row whose
+    // context menu is open stays highlighted.
+    let row_hovered = ui.rect_contains_pointer(rect)
+        || egui::Popup::is_id_open(ui.ctx(), egui::Popup::default_response_id(&resp));
 
     let font_id = FontId::new(palette.text_size, FontFamily::Proportional);
     let icon_font_id = FontId::new(palette.tab_icon_size, FontFamily::Proportional);
@@ -559,7 +572,6 @@ fn handle_draw_vertical_tab_row(
     let icon_size = palette.tab_icon_size;
     let spacing = 6.0;
     let padding = VERTICAL_TAB_ROW_PADDING;
-    let close_button_width = 20.0;
     let icon_rect = egui::Rect::from_min_size(
         egui::pos2(
             item_rect.left() + padding,
@@ -591,9 +603,7 @@ fn handle_draw_vertical_tab_row(
         item_rect.left() + padding + icon_draw_width + spacing,
         item_rect.center().y,
     );
-    // Space for the close button is always reserved so titles don't reflow on hover.
-    let text_width =
-        item_rect.width() - icon_draw_width - spacing - 2.0 * padding - close_button_width;
+    let text_width = item_rect.width() - icon_draw_width - spacing - 2.0 * padding;
     let (display_title, truncated) =
         truncate_item_text(ui, &tab.title, text_width, &font_id, label_color);
 
@@ -656,17 +666,7 @@ fn handle_draw_vertical_tab_row(
         label_color,
     );
 
-    // Shifted left a little so the button stays clear of the scroll bar's hit area.
-    // `is_active = false`: the close glyph's "active" color is meant for the accent fill of
-    // horizontal tabs and would be unreadable on the content background.
-    let close_anchor = item_rect.with_max_x(item_rect.right() - 2.0);
-    let close_clicked = if is_active || row_hovered {
-        tab_close_button(ui, close_anchor, tab.id, false, palette).clicked()
-    } else {
-        false
-    };
-
-    if close_clicked || resp.middle_clicked() {
+    if resp.middle_clicked() {
         action.close = Some(tab.id);
     } else if icon_resp.clicked() {
         action.toggle_pin = Some(tab.full_path.clone());
@@ -677,6 +677,17 @@ fn handle_draw_vertical_tab_row(
     if icon_resp.hovered() {
         ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
     }
+
+    show_tab_context_menu(
+        &resp.union(icon_resp),
+        i18n,
+        palette,
+        tabs,
+        index,
+        active_id,
+        TabStripKind::Vertical,
+        action,
+    );
 
     if resp.hovered() {
         ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
@@ -691,13 +702,15 @@ fn handle_draw_vertical_tab_row(
 fn handle_draw_tab_new_allocated(
     ui: &mut egui::Ui,
     i18n: &I18n,
-    tab: &TabInfo,
+    tabs: &[TabInfo],
+    index: usize,
     rect: egui::Rect,
     resp: egui::Response,
     active_id: u64,
     palette: &ThemePalette,
     action: &mut TabsAction,
 ) {
+    let tab = &tabs[index];
     let is_active = tab.id == active_id;
     let corner = if is_active {
         palette.tab_active_radius
@@ -819,6 +832,17 @@ fn handle_draw_tab_new_allocated(
         ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
     }
 
+    show_tab_context_menu(
+        &resp.union(icon_resp).union(close_resp),
+        i18n,
+        palette,
+        tabs,
+        index,
+        active_id,
+        TabStripKind::Horizontal,
+        action,
+    );
+
     if resp.hovered() {
         ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
 
@@ -830,6 +854,123 @@ fn handle_draw_tab_new_allocated(
                 .color(palette.tooltip_text_color),
         );
     }
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum TabStripKind {
+    Horizontal,
+    Vertical,
+}
+
+/// This PC and the Recycle Bin have no folder path to tag, favorite or copy.
+fn is_virtual_tab_path(path: &std::path::Path) -> bool {
+    let path = path.to_string_lossy();
+    path == MY_PC_PATH || path == MY_RECYCLE_BIN_PATH
+}
+
+/// Right-click menu of `tabs[index]`, shared by the horizontal strip and the vertical rail.
+///
+/// Bulk closing ("other tabs", "tabs below/to the right") skips pinned tabs, like browsers
+/// do; a pinned tab can still be closed on its own.
+fn show_tab_context_menu(
+    response: &egui::Response,
+    i18n: &I18n,
+    palette: &ThemePalette,
+    tabs: &[TabInfo],
+    index: usize,
+    active_id: u64,
+    kind: TabStripKind,
+    action: &mut TabsAction,
+) {
+    let tab = &tabs[index];
+    egui::Popup::context_menu(response)
+        .close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside)
+        .show(|ui| {
+            ui.output_mut(|o| o.cursor_icon = egui::CursorIcon::Default);
+            apply_eden_visual_overrides(ui, palette);
+            apply_eden_text_overrides(ui, palette);
+            // Grow the menu to fit its longest label (e.g. "Remove from favorites") instead of
+            // wrapping it inside the default menu width.
+            ui.style_mut().wrap_mode = Some(egui::TextWrapMode::Extend);
+
+            let is_virtual = is_virtual_tab_path(&tab.full_path);
+            let command = |ui: &mut egui::Ui, enabled: bool, label: String| {
+                ui.add_enabled(enabled, egui::Button::new(label)).clicked()
+            };
+
+            if command(ui, !is_virtual, i18n.tr("tab_menu_add_tag")) {
+                action.context = Some(TabContextAction::AddTag(tab.full_path.clone()));
+                ui.close();
+            }
+
+            let favorite_label = if tab.is_favorite {
+                i18n.tr("tab_menu_remove_favorite")
+            } else {
+                i18n.tr("tab_menu_add_favorite")
+            };
+            let favorite = ui
+                .add_enabled(!is_virtual, egui::Button::new(favorite_label))
+                .on_disabled_hover_text(
+                    egui::RichText::new(i18n.tr("tooltip_favorites_disabled"))
+                        .size(palette.tooltip_text_size)
+                        .color(palette.tooltip_text_color),
+                );
+            if favorite.clicked() {
+                let path = tab.full_path.clone();
+                action.context = Some(if tab.is_favorite {
+                    TabContextAction::RemoveFavorite(path)
+                } else {
+                    TabContextAction::AddFavorite(path)
+                });
+                ui.close();
+            }
+
+            if command(ui, true, tab_pin_tooltip(i18n, tab.is_pinned)) {
+                action.toggle_pin = Some(tab.full_path.clone());
+                ui.close();
+            }
+
+            if command(ui, true, i18n.tr("tab_menu_duplicate")) {
+                action.context = Some(TabContextAction::Duplicate(tab.id));
+                ui.close();
+            }
+
+            // Opens next to the active tab's own view, so it's pointless for the active tab.
+            if tab.id != active_id && command(ui, true, i18n.tr("inputs_opensplit")) {
+                action.context = Some(TabContextAction::OpenInSplit(tab.full_path.clone()));
+                ui.close();
+            }
+
+            if command(ui, !is_virtual, i18n.tr("tab_menu_copy_path")) {
+                action.context = Some(TabContextAction::CopyPath(tab.full_path.clone()));
+                ui.close();
+            }
+
+            ui.separator();
+
+            if command(ui, true, i18n.tr("tab_menu_close")) {
+                action.close = Some(tab.id);
+                ui.close();
+            }
+
+            let can_close_others = tabs
+                .iter()
+                .any(|other| other.id != tab.id && !other.is_pinned);
+            if command(ui, can_close_others, i18n.tr("tab_menu_close_others")) {
+                action.context = Some(TabContextAction::CloseOthers(tab.id));
+                ui.close();
+            }
+
+            let can_close_after = tabs[index + 1..].iter().any(|other| !other.is_pinned);
+            let close_after_label = match kind {
+                TabStripKind::Vertical => i18n.tr("tab_menu_close_below"),
+                TabStripKind::Horizontal => i18n.tr("tab_menu_close_right"),
+            };
+            if command(ui, can_close_after, close_after_label) {
+                action.context = Some(TabContextAction::CloseAfter(tab.id));
+                ui.close();
+            }
+        });
 }
 
 fn handle_draw_add_new_tab_button(
