@@ -1,0 +1,16 @@
+# Exercises every command once (keyboard, wheel, errors). Default layout.
+size 1000 640
+wait_ms 500
+shot out/smoke_0_start.png
+key T ctrl
+shot out/smoke_1_ctrl_t.png
+click 500 200 right
+shot out/smoke_2_context_menu.png
+key Escape
+move 600 300
+wheel -120
+down
+up
+bogus command
+size 10 10
+shot out/smoke_3_end.png

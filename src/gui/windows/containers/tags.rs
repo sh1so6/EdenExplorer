@@ -762,7 +762,7 @@ pub fn draw_container_header(
                     );
                     if drag_rect.width() > 4.0 {
                         let resp = ui.allocate_rect(drag_rect, egui::Sense::click_and_drag());
-                        if resp.drag_started() || resp.dragged() {
+                        if (resp.drag_started() || resp.dragged()) && !crate::core::probe_active() {
                             ui.ctx().send_viewport_cmd(egui::ViewportCommand::StartDrag);
                         }
                         if resp.hovered() {

@@ -293,33 +293,38 @@ fn default_next_tag_group_id() -> u64 {
     1
 }
 
+/// Root of all persisted app data (`%LOCALAPPDATA%\ExplorerEden`). In UI probe
+/// mode this is redirected to an isolated directory.
+fn app_data_dir() -> Option<PathBuf> {
+    #[cfg(feature = "ui-probe")]
+    if let Some(dir) = crate::core::probe::data_dir_override() {
+        return Some(dir);
+    }
+    Some(dirs::data_local_dir()?.join("ExplorerEden"))
+}
+
 fn favorites_cache_path(drive: char) -> Option<PathBuf> {
-    let base = dirs::data_local_dir()?;
     Some(
-        base.join("ExplorerEden")
+        app_data_dir()?
             .join("favorites")
             .join(format!("drive_{}.bin", drive)),
     )
 }
 
 fn settings_cache_path() -> Option<PathBuf> {
-    let base = dirs::data_local_dir()?;
-    Some(base.join("ExplorerEden").join("settings.bin"))
+    Some(app_data_dir()?.join("settings.bin"))
 }
 
 fn theme_cache_path() -> Option<PathBuf> {
-    let base = dirs::data_local_dir()?;
-    Some(base.join("ExplorerEden").join("theme.bin"))
+    Some(app_data_dir()?.join("theme.bin"))
 }
 
 fn layout_settings_path() -> Option<PathBuf> {
-    let base = dirs::data_local_dir()?;
-    Some(base.join("ExplorerEden").join("layout.json"))
+    Some(app_data_dir()?.join("layout.json"))
 }
 
 fn tags_cache_path() -> Option<PathBuf> {
-    let base = dirs::data_local_dir()?;
-    Some(base.join("ExplorerEden").join("tags.bin"))
+    Some(app_data_dir()?.join("tags.bin"))
 }
 
 pub fn load_favorites(drive: char) -> Vec<String> {

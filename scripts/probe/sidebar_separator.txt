@@ -1,0 +1,32 @@
+# Sidebar resize handle + vertical tabs visuals (regression for 09c3ea7).
+# Run with the vertical-tabs seed:
+#   ./scripts/ui-probe.ps1 -Script scripts/probe/sidebar_separator.txt -Seed scripts/probe/seed_vertical_tabs
+# Coordinates are egui points in a 1117x717 window (default sidebar width,
+# vertical tab rail 200 wide => sidebar border at x=261, rail spans 262..462).
+size 1117 717
+
+# Let drives/sidebar finish loading.
+wait_ms 800
+shot out/sidebar_separator_0_baseline.png
+
+# Hover the sidebar's right border: the handle pill must sit centered on the line.
+move 261 360
+shot out/sidebar_separator_1_hover_border.png
+
+# Drag the border 60 pt to the left: sidebar narrower, handle follows the line.
+drag 261 360 201 360 12
+shot out/sidebar_separator_2_dragged.png
+
+# Hover the (active) vertical tab row (rail moved ~60 pt left).
+move 300 99
+shot out/sidebar_separator_3_hover_tab.png
+
+# Click "+ New tab" at the top of the rail: 2 tabs, the new one active.
+click 250 56
+wait_ms 300
+shot out/sidebar_separator_4_new_tab.png
+
+# Hover the now-inactive first tab row: hover fill + close X appear.
+move 300 99
+shot out/sidebar_separator_5_hover_inactive_tab.png
+quit

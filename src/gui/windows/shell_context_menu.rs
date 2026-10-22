@@ -116,6 +116,10 @@ impl ShellContextMenu {
     /// Displays the complete shell-provided menu at the current pointer
     /// position and invokes the command selected by the user.
     pub fn show_native(&self, hwnd: HWND) -> windows::core::Result<()> {
+        // A modal native menu at the real cursor would hijack the user's session.
+        if crate::core::probe_active() {
+            return Ok(());
+        }
         let mut point = windows::Win32::Foundation::POINT::default();
         unsafe {
             windows::Win32::UI::WindowsAndMessaging::GetCursorPos(&mut point)?;

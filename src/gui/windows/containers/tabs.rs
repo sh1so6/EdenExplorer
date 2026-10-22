@@ -119,7 +119,7 @@ pub fn handle_window_drag_area(
         }
     }
 
-    if resp.drag_started() || resp.dragged() {
+    if (resp.drag_started() || resp.dragged()) && !crate::core::probe_active() {
         ui.ctx().send_viewport_cmd(egui::ViewportCommand::StartDrag);
     }
 

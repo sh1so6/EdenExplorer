@@ -30,18 +30,21 @@ fn main() -> eframe::Result<()> {
         }
     };
 
-    let _instance_guard = if launch_options.new_window || launch_paths.is_empty() {
-        None
-    } else {
-        match acquire_or_forward(&launch_paths) {
-            Ok(Some(guard)) => Some(guard),
-            Ok(None) => return Ok(()),
-            Err(error) => {
-                show_launch_error(&error);
-                return Ok(());
+    // The UI probe must run side by side with a normal instance: never take the
+    // single-instance mutex nor forward paths.
+    let _instance_guard =
+        if launch_options.new_window || launch_paths.is_empty() || crate::core::probe_active() {
+            None
+        } else {
+            match acquire_or_forward(&launch_paths) {
+                Ok(Some(guard)) => Some(guard),
+                Ok(None) => return Ok(()),
+                Err(error) => {
+                    show_launch_error(&error);
+                    return Ok(());
+                }
             }
-        }
-    };
+        };
 
     unsafe {
         let _ = CoInitializeEx(None, COINIT_APARTMENTTHREADED);
@@ -73,6 +76,8 @@ fn main() -> eframe::Result<()> {
             .with_clamp_size_to_monitor_size(true),
         ..Default::default()
     };
+    #[cfg(feature = "ui-probe")]
+    let options = crate::core::probe::adjust_native_options(options);
 
     eframe::run_native(
         "EdenExplorer",

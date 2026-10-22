@@ -242,15 +242,11 @@ pub fn apply_window_override(hwnd: HWND, palette: &ThemePalette) {
 
         let _ = DwmExtendFrameIntoClientArea(hwnd, &margins);
 
-        let _ = SetWindowPos(
-            hwnd,
-            None,
-            0,
-            0,
-            0,
-            0,
-            SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_FRAMECHANGED,
-        );
+        let mut flags = SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_FRAMECHANGED;
+        if crate::core::probe_active() {
+            flags |= SWP_NOACTIVATE;
+        }
+        let _ = SetWindowPos(hwnd, None, 0, 0, 0, 0, flags);
     }
 }
 
@@ -539,6 +535,7 @@ pub fn handle_draw_windows_buttons(
             )
             .on_hover_cursor(egui::CursorIcon::PointingHand)
             .clicked()
+            && !crate::core::probe_active()
         {
             unsafe {
                 let _ = ShowWindow(hwnd, SW_MINIMIZE);
@@ -549,6 +546,10 @@ pub fn handle_draw_windows_buttons(
 }
 
 pub fn toggle_window_fullscreen(hwnd: HWND) {
+    // ShowWindow would activate the probe window and move it on-screen.
+    if crate::core::probe_active() {
+        return;
+    }
     unsafe {
         let mut placement = WINDOWPLACEMENT {
             length: std::mem::size_of::<WINDOWPLACEMENT>() as u32,

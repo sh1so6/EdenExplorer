@@ -366,12 +366,16 @@ impl eframe::App for MainWindow {
             if let Some(hwnd) = self.hwnd {
                 apply_window_override(hwnd, &palette);
 
-                crate::gui::windows::windowsoverrides::set_window_mode(
-                    hwnd,
-                    &self.settings_window.current_settings.window_size_mode,
-                );
+                // The UI probe keeps its scripted size and off-screen position
+                // (both calls would also show/activate the window).
+                if !crate::core::probe_active() {
+                    crate::gui::windows::windowsoverrides::set_window_mode(
+                        hwnd,
+                        &self.settings_window.current_settings.window_size_mode,
+                    );
 
-                crate::gui::windows::windowsoverrides::clamp_window_to_monitor_work_area(hwnd);
+                    crate::gui::windows::windowsoverrides::clamp_window_to_monitor_work_area(hwnd);
+                }
 
                 self.window_override_set = true;
             }
@@ -1227,7 +1231,11 @@ impl eframe::App for MainWindow {
 
         let primary_drag_active = self.tabs[self.active_tab].primary_view.drag_state.active;
         if pending_action.is_none() && primary_drag_active && !native_drag_active {
-            let pointer_inside = if let Some(hwnd) = self.hwnd {
+            // The UI probe drives a synthetic pointer: the real cursor is never
+            // "inside", so never hand the drag over to native OLE drag-out.
+            let pointer_inside = if crate::core::probe_active() {
+                true
+            } else if let Some(hwnd) = self.hwnd {
                 unsafe {
                     let mut screen_pt = POINT::default();
                     if GetCursorPos(&mut screen_pt).is_err() {
@@ -1444,5 +1452,10 @@ impl eframe::App for MainWindow {
         self.flush_pending_column_settings_save(ui.ctx());
 
         self.icon_cache = Some(icon_cache);
+    }
+
+    #[cfg(feature = "ui-probe")]
+    fn raw_input_hook(&mut self, ctx: &egui::Context, raw_input: &mut egui::RawInput) {
+        crate::core::probe::raw_input_hook(ctx, raw_input);
     }
 }

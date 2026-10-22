@@ -273,7 +273,7 @@ fn draw_drag_region(ui: &mut egui::Ui, hwnd: Option<HWND>) {
                 toggle_window_fullscreen(hwnd);
             }
         }
-        if resp.drag_started() || resp.dragged() {
+        if (resp.drag_started() || resp.dragged()) && !crate::core::probe_active() {
             ui.ctx().send_viewport_cmd(egui::ViewportCommand::StartDrag);
         }
         if resp.hovered() {
