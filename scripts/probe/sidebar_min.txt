@@ -1,0 +1,12 @@
+# Sidebar narrowed to its minimum: drive rows/usage bars and the topbar row
+# must fit inside the border; mode icons that don't fit move into the menu.
+size 1117 717
+wait_ms 800
+drag 261 360 100 360 16
+wait_frames 5
+shot out/sidebar_min_0.png
+# Open the hamburger menu: overflowed icons are listed above the usual items.
+click 18 18
+wait_frames 3
+shot out/sidebar_min_1_menu.png
+quit

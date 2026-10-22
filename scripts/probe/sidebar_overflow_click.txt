@@ -1,0 +1,23 @@
+# At the minimum sidebar width, use overflowed mode icons from the hamburger menu.
+size 1117 717
+wait_ms 800
+drag 261 360 100 360 16
+wait_frames 5
+# Menu entry 3 ("Switch to vertical tabs" / "...horizontal tabs").
+click 18 18
+wait_frames 3
+click 80 96
+wait_ms 300
+shot out/sidebar_overflow_click_0_toggled_tabs.png
+# Reopen: the vertical-tabs entry now shows the opposite label, accent icon.
+click 18 18
+wait_frames 3
+shot out/sidebar_overflow_click_1_menu.png
+# Menu entry 1 ("Show Tags"): switches to the tags view.
+click 60 44
+wait_ms 300
+shot out/sidebar_overflow_click_2_tags.png
+click 18 18
+wait_frames 3
+shot out/sidebar_overflow_click_3_tags_menu.png
+quit

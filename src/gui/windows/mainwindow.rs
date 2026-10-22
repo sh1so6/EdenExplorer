@@ -496,7 +496,7 @@ impl eframe::App for MainWindow {
                         // vertical tab rail attaches to its right border.
                         let mut sidebar_frame_rect: Option<egui::Rect> = None;
 
-                        ui.allocate_ui_with_layout(
+                        let sidebar_column_rect = ui.allocate_ui_with_layout(
                             egui::vec2(sidebar_width, ui.available_height() + 15.5),
                             egui::Layout::top_down(egui::Align::Min),
                             |ui| {
@@ -529,7 +529,9 @@ impl eframe::App for MainWindow {
                                     sidebar_frame_rect = Some(frame_response.response.rect);
                                 }
                             },
-                        );
+                        )
+                        .response
+                        .rect;
 
                         // --- Sidebar separator, only when expanded ---
                         // Reserve the same layout space as before so the explorer column keeps
@@ -537,11 +539,30 @@ impl eframe::App for MainWindow {
                         // explorer column (so it wins hit-testing) and is aligned with the
                         // sidebar frame's visible right border rather than `sidebar_width`,
                         // which is relative to the column and not to the window.
+                        //
+                        // The explorer column normally starts at
+                        // `sidebar_width + SIDEBAR_SEPARATOR_WIDTH / 2 + item_spacing`, which is
+                        // 1px right of the sidebar frame (the frame is always slightly wider
+                        // than `sidebar_width`). If sidebar content ever makes the column wider
+                        // than that, start after the column instead so the two never overlap.
+                        // (`sidebar_width` is used as an absolute x here, as before: the column
+                        // starts at x = 0; the `max` keeps this safe if that ever changes.)
                         const SIDEBAR_SEPARATOR_WIDTH: f32 = 6.0;
                         if !self.sidebar_collapsed {
-                            ui.advance_cursor_after_rect(egui::Rect::from_min_size(
-                                egui::pos2(sidebar_width - SIDEBAR_SEPARATOR_WIDTH / 2.0, 0.0),
-                                egui::vec2(SIDEBAR_SEPARATOR_WIDTH, ui.available_height()),
+                            let item_spacing_x = ui.spacing().item_spacing.x;
+                            let explorer_left = (sidebar_width
+                                + SIDEBAR_SEPARATOR_WIDTH / 2.0
+                                + item_spacing_x)
+                                .max(sidebar_column_rect.right() + 1.0);
+                            ui.advance_cursor_after_rect(egui::Rect::from_min_max(
+                                egui::pos2(
+                                    explorer_left - item_spacing_x - SIDEBAR_SEPARATOR_WIDTH,
+                                    0.0,
+                                ),
+                                egui::pos2(
+                                    explorer_left - item_spacing_x,
+                                    ui.available_height(),
+                                ),
                             ));
                         }
 

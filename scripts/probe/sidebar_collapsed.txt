@@ -1,0 +1,7 @@
+# Collapsed sidebar rail (unchanged by the topbar overflow).
+size 1117 717
+wait_ms 800
+click 43 18
+wait_ms 300
+shot out/sidebar_collapsed_0.png
+quit

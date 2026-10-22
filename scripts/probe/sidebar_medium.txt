@@ -1,0 +1,17 @@
+# Sidebar dragged to a medium width where only some mode icons overflow.
+size 1117 717
+wait_ms 800
+drag 261 360 200 360 12
+wait_frames 5
+shot out/sidebar_medium_0.png
+click 18 18
+wait_frames 3
+shot out/sidebar_medium_1_menu.png
+click 700 650
+drag 200 360 180 360 8
+wait_frames 5
+shot out/sidebar_medium_2.png
+click 18 18
+wait_frames 3
+shot out/sidebar_medium_3_menu.png
+quit

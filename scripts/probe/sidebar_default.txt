@@ -1,0 +1,9 @@
+# Default sidebar width (250): topbar row must look exactly like before the
+# overflow change (all mode icons in the row, nothing in the menu).
+size 1117 717
+wait_ms 800
+shot out/sidebar_default_0.png
+click 18 18
+wait_frames 3
+shot out/sidebar_default_1_menu.png
+quit
