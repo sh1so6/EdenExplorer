@@ -14,21 +14,31 @@ pub fn update_tab_infos_cache(
     i18n: &I18n,
 ) {
     if *tab_infos_dirty || tab_infos_cache.len() != tabs.len() {
+        let previous = std::mem::take(tab_infos_cache);
         *tab_infos_cache = tabs
             .iter()
-            .map(|tab| TabInfo {
-                id: tab.id,
-                title: tab_title_for(&tab.primary_view.nav, i18n),
-                full_path: if tab.primary_view.nav.is_root() {
+            .map(|tab| {
+                let full_path = if tab.primary_view.nav.is_root() {
                     PathBuf::from(MY_PC_PATH)
                 } else {
                     tab.primary_view.nav.current.clone()
-                },
-                is_pinned: settings_window
-                    .current_settings
-                    .pinned_tabs
+                };
+                // Favorites aren't known here; keep the last known state for the path until
+                // `refresh_tab_favorite_flags` runs at the end of the frame.
+                let is_favorite = previous
                     .iter()
-                    .any(|p| p == &tab.primary_view.nav.current),
+                    .any(|info| info.full_path == full_path && info.is_favorite);
+                TabInfo {
+                    id: tab.id,
+                    title: tab_title_for(&tab.primary_view.nav, i18n),
+                    full_path,
+                    is_pinned: settings_window
+                        .current_settings
+                        .pinned_tabs
+                        .iter()
+                        .any(|p| p == &tab.primary_view.nav.current),
+                    is_favorite,
+                }
             })
             .collect();
         *tab_infos_dirty = false;

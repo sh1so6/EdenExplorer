@@ -45,6 +45,29 @@ pub struct TabInfo {
     pub title: String,
     pub full_path: PathBuf,
     pub is_pinned: bool,
+    /// Whether `full_path` is in the sidebar favorites. Refreshed once per frame by
+    /// `handle_tabs_action`, since favorites can change outside the tab cache's dirty flag.
+    pub is_favorite: bool,
+}
+
+/// Commands from a tab's right-click menu that go beyond the plain `TabsAction` fields
+/// (pin and close reuse `toggle_pin` / `close`).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum TabContextAction {
+    /// Opens the tag picker for the tab's folder.
+    AddTag(PathBuf),
+    AddFavorite(PathBuf),
+    RemoveFavorite(PathBuf),
+    /// Opens a new tab with the same location right after the given tab and activates it.
+    Duplicate(u64),
+    /// Opens the path as the split view of the active tab.
+    OpenInSplit(PathBuf),
+    CopyPath(PathBuf),
+    /// Closes every unpinned tab except the given one.
+    CloseOthers(u64),
+    /// Closes every unpinned tab after the given one (below it in the vertical rail, to
+    /// its right in the horizontal strip).
+    CloseAfter(u64),
 }
 
 #[derive(Default)]
@@ -57,6 +80,7 @@ pub struct TabsAction {
     pub scroll_left: bool,
     pub scroll_right: bool,
     pub max_scroll_offset: f32,
+    pub context: Option<TabContextAction>,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]

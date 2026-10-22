@@ -1,0 +1,99 @@
+# Tab right-click menu, vertical rail (run with -Seed scripts/probe/seed_vertical_tabs).
+# Launch with a scratch folder containing subfolders alpha/beta/gamma (ui-probe.ps1
+# passes no args), e.g. from bash:
+#   mkdir -p "$TEMP/eden-tabctx-scratch/"{alpha,beta,gamma}
+#   mkdir -p "$TEMP/eden-tabctx-data"; cp scripts/probe/seed_vertical_tabs/* "$TEMP/eden-tabctx-data/"
+#   EDEN_PROBE_SCRIPT=<abs path of this file> EDEN_PROBE_DATA_DIR=<that data dir> \
+#     target/probe/release/EdenExplorer.exe "%TEMP%\eden-tabctx-scratch"
+# Rows: y=100 / 132 / 164 / 196. The menu opens at the pointer; items are 22px apart
+# starting 17px below it (Add tag, Favorites, Pin, Duplicate, [Open in split view],
+# Copy path, separator, Close, Close others, Close below). "Copy path" is never
+# clicked because it writes the real clipboard.
+size 1117 717
+wait_ms 1200
+
+# Tabs: scratch, alpha, This PC (active).
+click 300 56
+wait_ms 600
+click 520 100
+click 520 100
+wait_ms 800
+click 300 56
+wait_ms 600
+click 70 79
+wait_ms 800
+
+# Rows have no close button, even when hovered.
+move 360 100
+shot out/tabctx_v1_rows.png
+
+# Pin the scratch tab (row 1) from its menu.
+click 360 100 right
+wait_ms 300
+click 400 161
+wait_ms 300
+
+# Menu on an inactive real folder (alpha).
+click 360 132 right
+wait_ms 400
+shot out/tabctx_v2_menu.png
+
+# Add to favorites -> sidebar Favorites lists alpha.
+click 400 171
+wait_ms 500
+shot out/tabctx_v3_favorite_added.png
+
+# Same menu now offers "Remove from favorites".
+click 360 132 right
+wait_ms 400
+shot out/tabctx_v4_menu_remove_favorite.png
+key Escape
+wait_ms 200
+
+# Menu on the active This PC tab: no split item, virtual-path items disabled.
+click 360 164 right
+wait_ms 300
+move 400 203
+wait_ms 800
+shot out/tabctx_v5_menu_thispc.png
+key Escape
+wait_ms 200
+
+# Duplicate alpha -> inserted right after it and activated.
+click 360 132 right
+wait_ms 300
+click 400 215
+wait_ms 800
+shot out/tabctx_v6_duplicated.png
+
+# Open the (pinned) scratch tab in the active tab's split view.
+click 360 100 right
+wait_ms 300
+click 400 205
+wait_ms 800
+shot out/tabctx_v7_split.png
+
+# Close other tabs from alpha: the pinned scratch tab stays.
+click 360 132 right
+wait_ms 300
+click 400 311
+wait_ms 800
+shot out/tabctx_v8_closed_others.png
+
+# New tab, then "Close tabs below" from the scratch tab.
+click 300 56
+wait_ms 600
+click 360 100 right
+wait_ms 300
+shot out/tabctx_v9_menu_before_close_below.png
+click 400 301
+wait_ms 800
+shot out/tabctx_v10_closed_below.png
+
+# Add tag... opens the tag picker for the tab's folder.
+click 360 100 right
+wait_ms 300
+click 400 117
+wait_ms 600
+shot out/tabctx_v11_tag_picker.png
+quit

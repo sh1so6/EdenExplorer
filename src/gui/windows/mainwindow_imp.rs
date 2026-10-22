@@ -1,6 +1,6 @@
 use crate::core::drives::{get_drive_infos, is_raw_physical_drive_path};
 use crate::core::fs::{FileItem, get_shell_item_metadata};
-use crate::core::fs::{MY_RECYCLE_BIN_PATH, parallel_directory_scan, scan_dir_async};
+use crate::core::fs::{MY_PC_PATH, MY_RECYCLE_BIN_PATH, parallel_directory_scan, scan_dir_async};
 use crate::core::indexer::{
     DirectorySettingsSnapshot, LayoutSettingsSnapshot, WindowSizeMode, load_app_settings,
     save_app_settings, save_favorites, save_layout_settings, save_tags, save_theme_settings,
@@ -24,7 +24,7 @@ use crate::gui::windows::containers::structs::{
     FavoriteItem, FileOpCompletion, FileOpState, FilterState, GalleryThumbnailSize,
     ItemViewerColumnFitRequest, ItemViewerColumnState, ItemViewerDisplayMode,
     ItemViewerFolderSizeState, ItemViewerNavBarAction, RenameState, SidebarAction, SplitSide,
-    TabState, TabView, TabsAction, TopbarAction,
+    TabContextAction, TabState, TabView, TabsAction, TopbarAction,
 };
 use crate::gui::windows::customizetheme::draw_theme_customizer;
 use crate::gui::windows::enums::{SettingsAction, ThemeCustomizerAction};
@@ -49,6 +49,13 @@ use windows::Win32::UI::Shell::{
 };
 use windows::Win32::UI::WindowsAndMessaging::{PostMessageW, SW_SHOW, SW_SHOWNORMAL, WM_CLOSE};
 use windows::{Win32::System::Com::*, Win32::UI::Shell::*, core::*};
+
+/// This PC and the Recycle Bin: locations without a real folder path, so they can't be
+/// tagged, added to favorites or copied as a path.
+pub(crate) fn is_virtual_location(path: &Path) -> bool {
+    let path = path.to_string_lossy();
+    path == MY_PC_PATH || path == MY_RECYCLE_BIN_PATH
+}
 
 pub(crate) fn default_column_state(settings: &AppSettings) -> ItemViewerColumnState {
     ItemViewerColumnState::from_saved_orders(
@@ -940,11 +947,17 @@ impl MainWindow {
     }
 
     pub fn add_favorite(&mut self) {
-        if self.current_nav().is_root() || self.current_nav().is_recycle_bin() {
+        let path = self.current_nav().current.clone();
+        self.add_favorite_path(path);
+    }
+
+    /// Adds `path` to the sidebar favorites unless it is virtual (This PC, Recycle Bin)
+    /// or already a favorite.
+    pub fn add_favorite_path(&mut self, path: PathBuf) {
+        if is_virtual_location(&path) {
             return;
         }
 
-        let path = self.current_nav().current.clone();
         if self
             .sidebar_state
             .favorites
@@ -1524,6 +1537,24 @@ impl MainWindow {
         tabs_action: Option<TabsAction>,
         drag_sources: Option<&[PathBuf]>,
     ) {
+        self.handle_tabs_action_inner(tabs_action, drag_sources);
+        // Runs every frame (the main loop always calls this), so the next frame's tab menus
+        // see favorites changed from anywhere (navbar, sidebar, settings reset).
+        self.refresh_tab_favorite_flags();
+    }
+
+    fn refresh_tab_favorite_flags(&mut self) {
+        let favorites = &self.sidebar_state.favorites;
+        for info in &mut self.tab_infos_cache {
+            info.is_favorite = favorites.iter().any(|fav| fav.path == info.full_path);
+        }
+    }
+
+    fn handle_tabs_action_inner(
+        &mut self,
+        tabs_action: Option<TabsAction>,
+        drag_sources: Option<&[PathBuf]>,
+    ) {
         if let Some(action) = tabs_action {
             if let Some(id) = action.activate {
                 self.active_tab = self.tabs.iter().position(|t| t.id == id).unwrap();
@@ -1581,6 +1612,10 @@ impl MainWindow {
                             }
                         }
                         self.tabs.remove(idx);
+                        // Closing a tab left of the active one must not switch tabs.
+                        if idx < self.active_tab {
+                            self.active_tab -= 1;
+                        }
                         if self.active_tab >= self.tabs.len() {
                             self.active_tab = self.tabs.len() - 1;
                         }
@@ -1647,6 +1682,9 @@ impl MainWindow {
 
                 self.mark_tab_infos_dirty();
             }
+            if let Some(context) = action.context {
+                self.handle_tab_context_action(context);
+            }
             if let Some(target_dir) = action.move_files_to_tab_dir.as_ref() {
                 if let Some(sources) = drag_sources {
                     self.move_selected_paths_to_dir(sources, target_dir.clone());
@@ -1661,6 +1699,126 @@ impl MainWindow {
                     (self.tab_scroll_offset + 180.0).min(action.max_scroll_offset);
             }
         }
+    }
+
+    fn handle_tab_context_action(&mut self, context: TabContextAction) {
+        match context {
+            TabContextAction::AddTag(path) => {
+                if !is_virtual_location(&path) {
+                    self.tags_state.open_picker(vec![path]);
+                }
+            }
+            TabContextAction::AddFavorite(path) => self.add_favorite_path(path),
+            TabContextAction::RemoveFavorite(path) => self.remove_favorite(&path),
+            TabContextAction::Duplicate(id) => self.duplicate_tab(id),
+            TabContextAction::OpenInSplit(path) => self.open_path_in_split(path),
+            TabContextAction::CopyPath(path) => {
+                if !is_virtual_location(&path) {
+                    use crate::gui::utils::copy_text_to_clipboard;
+                    let _ = copy_text_to_clipboard(self.hwnd, &path.display().to_string());
+                }
+            }
+            TabContextAction::CloseOthers(id) => {
+                let ids: Vec<u64> = self
+                    .tabs
+                    .iter()
+                    .filter(|tab| tab.id != id && !self.is_tab_pinned(tab))
+                    .map(|tab| tab.id)
+                    .collect();
+                self.close_tabs_keeping(&ids, id);
+            }
+            TabContextAction::CloseAfter(id) => {
+                let Some(idx) = self.tabs.iter().position(|tab| tab.id == id) else {
+                    return;
+                };
+                let ids: Vec<u64> = self.tabs[idx + 1..]
+                    .iter()
+                    .filter(|tab| !self.is_tab_pinned(tab))
+                    .map(|tab| tab.id)
+                    .collect();
+                self.close_tabs_keeping(&ids, id);
+            }
+        }
+    }
+
+    /// Same rule as the tab strip's pin icon (`TabInfo::is_pinned`).
+    fn is_tab_pinned(&self, tab: &TabState) -> bool {
+        self.settings_window
+            .current_settings
+            .pinned_tabs
+            .iter()
+            .any(|p| p == &tab.primary_view.nav.current)
+    }
+
+    /// Persists the directory settings of both views of the tab at `idx`, as closing a tab does.
+    fn persist_tab_directory_settings(&mut self, idx: usize) {
+        let Some(tab) = self.tabs.get(idx) else {
+            return;
+        };
+        let mut snapshots = vec![directory_settings_snapshot_for_view(&tab.primary_view)];
+        if let Some(split) = tab.split_view.as_ref() {
+            snapshots.push(directory_settings_snapshot_for_view(split));
+        }
+        for snapshot in snapshots {
+            let _ = persist_directory_settings_snapshot(
+                &mut self.settings_window.current_settings.directory_settings,
+                snapshot,
+            );
+        }
+    }
+
+    /// Closes the tabs in `ids` (bulk close from the tab menu). `keep_id` is never closed and
+    /// becomes the active tab if the active tab was among the closed ones.
+    fn close_tabs_keeping(&mut self, ids: &[u64], keep_id: u64) {
+        if ids.is_empty() {
+            return;
+        }
+        let active_id = self.active_tab().id;
+        let mut idx = 0;
+        while idx < self.tabs.len() {
+            let tab_id = self.tabs[idx].id;
+            if tab_id != keep_id && ids.contains(&tab_id) {
+                self.persist_tab_directory_settings(idx);
+                self.tabs.remove(idx);
+            } else {
+                idx += 1;
+            }
+        }
+        self.mark_tab_infos_dirty();
+
+        if let Some(pos) = self.tabs.iter().position(|tab| tab.id == active_id) {
+            // The active tab survived; only its index may have shifted.
+            self.active_tab = pos;
+            self.pending_tab_scroll_id = Some(active_id);
+        } else {
+            let action = TabsAction {
+                activate: Some(keep_id),
+                ..Default::default()
+            };
+            self.handle_tabs_action_inner(Some(action), None);
+        }
+    }
+
+    /// Opens a copy of tab `id` (same location and history) right after it and activates it.
+    fn duplicate_tab(&mut self, id: u64) {
+        let Some(idx) = self.tabs.iter().position(|tab| tab.id == id) else {
+            return;
+        };
+        let (nav, sort_column, sort_ascending) = {
+            let view = &self.tabs[idx].primary_view;
+            (view.nav.clone(), view.sort_column, view.sort_ascending)
+        };
+        let new_id = self.next_tab_id;
+        self.next_tab_id += 1;
+        let mut tab = TabState::new(new_id, nav, sort_column, sort_ascending);
+        let current_settings = self.settings_window.current_settings.clone();
+        apply_directory_settings_to_view(&mut tab.primary_view, &current_settings);
+        self.tabs.insert(idx + 1, tab);
+        self.active_tab = idx + 1;
+        self.focused_split = SplitSide::Primary;
+        self.pending_tab_scroll_id = Some(new_id);
+        self.mark_tab_infos_dirty();
+        self.load_path();
     }
 
     /// Toggles the active tab's split view: creates a second view (duplicating

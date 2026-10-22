@@ -1,0 +1,58 @@
+# Tab right-click menu, horizontal strip (run WITHOUT a seed, so tabs are horizontal).
+# Same scratch folder / launch as tab_context_menu.txt.
+# Tabs: x=340 / 530 / 720 at y=20. Menu items are 22px apart starting 17px below the
+# pointer (Add tag, Favorites, Pin, Duplicate, [Open in split view], Copy path,
+# separator, Close, Close others, Close to the right).
+size 1117 717
+wait_ms 1200
+
+# Tabs: scratch, alpha, This PC (active).
+key T ctrl
+wait_ms 600
+click 320 104
+click 320 104
+wait_ms 800
+key T ctrl
+wait_ms 600
+click 70 79
+wait_ms 800
+
+# Menu on the inactive alpha tab.
+click 530 20 right
+wait_ms 400
+shot out/tabctx_h1_menu.png
+
+# Add to favorites -> sidebar Favorites lists alpha.
+click 570 59
+wait_ms 500
+shot out/tabctx_h2_favorite_added.png
+
+# Add tag... from the first tab.
+click 340 20 right
+wait_ms 300
+click 380 37
+wait_ms 600
+shot out/tabctx_h3_tag_picker.png
+key Escape
+wait_ms 200
+click 410 440
+wait_ms 300
+
+# Activate alpha, then "Close tab" on the scratch tab to its left: alpha stays active.
+click 530 20
+wait_ms 500
+click 340 20 right
+wait_ms 300
+click 380 177
+wait_ms 800
+shot out/tabctx_h4_closed_left_of_active.png
+
+# Tabs: alpha (active), This PC. "Close tabs to the right" from alpha closes This PC
+# (alpha is active, so its menu has no split item and the entry sits at y=199).
+click 340 20 right
+wait_ms 400
+shot out/tabctx_h5_menu_first_tab.png
+click 380 199
+wait_ms 800
+shot out/tabctx_h6_closed_right.png
+quit
