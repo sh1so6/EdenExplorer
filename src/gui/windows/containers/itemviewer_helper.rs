@@ -18,11 +18,13 @@ use crate::gui::windows::containers::structs::{
     ItemViewerColumnState, ItemViewerColumnWidths, ItemViewerFolderSizeState, ItemViewerLayout,
     ItemViewerNavBarAction, RenameState,
 };
-use crate::gui::windows::shell_context_menu::{ShellContextMenu, ShellMenuNode};
+use crate::gui::windows::shell_context_menu::{
+    self, MENU_ICON_SIZE, MenuIcon, ShellContextMenu, ShellMenuNode,
+};
 use crate::gui::windows::structs::{SettingsWindow, ThemeCustomizer};
 use eframe::egui;
 use egui::containers::{Popup, PopupCloseBehavior};
-use egui::{FontFamily, FontId};
+use egui::{AtomExt as _, FontFamily, FontId};
 use egui_phosphor::regular;
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -178,10 +180,7 @@ pub fn handle_context_menu_actions(
     let enable_open_in_tab = context_paths.len() == 1;
 
     if ui
-        .add_enabled(
-            enable_open_in_tab,
-            egui::Button::new(i18n.tr("inputs_newtab")),
-        )
+        .add_enabled(enable_open_in_tab, menu_item(i18n.tr("inputs_newtab")))
         .clicked()
     {
         if let Some(path) = context_paths.first() {
@@ -193,7 +192,7 @@ pub fn handle_context_menu_actions(
     if ui
         .add_enabled(
             enable_open_in_tab && context_paths.first().is_some_and(|p| p.is_dir()),
-            egui::Button::new(i18n.tr("inputs_opensplit")),
+            menu_item(i18n.tr("inputs_opensplit")),
         )
         .clicked()
     {
@@ -209,7 +208,7 @@ pub fn handle_context_menu_actions(
         i18n.tr("open_files_default_program")
     };
 
-    if ui.button(i18n.tr("tag_manage")).clicked() {
+    if ui.add(menu_item(i18n.tr("tag_manage"))).clicked() {
         *action = Some(ItemViewerAction::Context(
             ItemViewerContextAction::ManageTags(context_paths.clone()),
         ));
@@ -218,10 +217,7 @@ pub fn handle_context_menu_actions(
 
     let all_files = context_paths.iter().all(|path| !path.is_dir());
 
-    if ui
-        .add_enabled(all_files, egui::Button::new(label))
-        .clicked()
-    {
+    if ui.add_enabled(all_files, menu_item(label)).clicked() {
         let paths: Vec<PathBuf> = explorer_state.selected_paths.iter().cloned().collect();
         *action = Some(ItemViewerAction::OpenWithDefault(paths));
         ui.close();
@@ -230,7 +226,7 @@ pub fn handle_context_menu_actions(
     ui.separator();
 
     if ui
-        .add_enabled(!is_cut, egui::Button::new(i18n.tr("inputs_cut")))
+        .add_enabled(!is_cut, menu_item(i18n.tr("inputs_cut")))
         .clicked()
     {
         *action = Some(ItemViewerAction::Context(ItemViewerContextAction::Cut(
@@ -238,32 +234,32 @@ pub fn handle_context_menu_actions(
         )));
         ui.close();
     }
-    if ui.button(i18n.tr("inputs_copy")).clicked() {
+    if ui.add(menu_item(i18n.tr("inputs_copy"))).clicked() {
         *action = Some(ItemViewerAction::Context(ItemViewerContextAction::Copy(
             context_paths.clone(),
         )));
         ui.close();
     }
-    if ui.button(i18n.tr("inputs_copy_path")).clicked() {
+    if ui.add(menu_item(i18n.tr("inputs_copy_path"))).clicked() {
         *action = Some(ItemViewerAction::Context(
             ItemViewerContextAction::CopyPath(context_paths.clone()),
         ));
         ui.close();
     }
     if ui
-        .add_enabled(paste_enabled, egui::Button::new(i18n.tr("inputs_paste")))
+        .add_enabled(paste_enabled, menu_item(i18n.tr("inputs_paste")))
         .clicked()
     {
         *action = Some(ItemViewerAction::Context(ItemViewerContextAction::Paste));
         ui.close();
     }
 
-    if ui.button(i18n.tr("inputs_rename")).clicked() {
+    if ui.add(menu_item(i18n.tr("inputs_rename"))).clicked() {
         *action = Some(ItemViewerAction::StartEdit(file.path.clone()));
         ui.close();
     }
 
-    if ui.button(i18n.tr("inputs_delete")).clicked() {
+    if ui.add(menu_item(i18n.tr("inputs_delete"))).clicked() {
         *action = Some(ItemViewerAction::Context(ItemViewerContextAction::Delete(
             context_paths.clone(),
         )));
@@ -271,7 +267,7 @@ pub fn handle_context_menu_actions(
     }
 
     // Properties (multi-select aware)
-    if ui.button(i18n.tr("properties")).clicked() {
+    if ui.add(menu_item(i18n.tr("properties"))).clicked() {
         *action = Some(ItemViewerAction::Context(
             ItemViewerContextAction::Properties(context_paths.clone()),
         ));
@@ -282,7 +278,11 @@ pub fn handle_context_menu_actions(
     let cache_miss = explorer_state
         .windows_context_menu_cache
         .as_ref()
-        .map(|cache| cache.selection != selected_paths)
+        .map(|cache| {
+            cache.selection != selected_paths
+                // Entries were hidden/shown in the settings since the build.
+                || cache.menu.hidden_version() != shell_context_menu::hidden_entries_version()
+        })
         .unwrap_or(true);
 
     if cache_miss {
@@ -329,7 +329,7 @@ pub fn handle_context_menu_actions(
     // menu below it, with its cascading submenus as egui submenus.
     ui.separator();
     if let Some(cache) = explorer_state.windows_context_menu_cache.as_ref() {
-        draw_shell_menu_nodes(ui, &cache.menu, cache.menu.nodes(), hwnd, _palette);
+        draw_shell_menu_nodes(ui, &cache.menu, "root", cache.menu.nodes(), hwnd, _palette);
     } else if hwnd.is_none() {
         ui.label(i18n.tr("contextmenu_windows_menu_available_missing"));
     } else {
@@ -337,11 +337,39 @@ pub fn handle_context_menu_actions(
     }
 }
 
+/// A context menu entry with a leading icon column (blank here), so Eden's
+/// entries line up with the shell entries and their icons.
+fn menu_item<'a>(text: impl Into<egui::WidgetText>) -> egui::Button<'a> {
+    egui::Button::new((menu_icon_atom(None), text.into()))
+}
+
+/// The leading icon cell of a context menu entry: the icon, or blank space
+/// of the same size.
+fn menu_icon_atom<'a>(texture: Option<&egui::TextureHandle>) -> egui::Atom<'a> {
+    let size = egui::Vec2::splat(MENU_ICON_SIZE);
+    match texture {
+        Some(texture) => {
+            egui::Image::from_texture(egui::load::SizedTexture::new(texture.id(), size))
+                .fit_to_exact_size(size)
+                .atom_size(size)
+        }
+        None => egui::Atom {
+            size: Some(size),
+            ..Default::default()
+        },
+    }
+}
+
+fn shell_icon_atom<'a>(ui: &egui::Ui, menu: &ShellContextMenu, icon: &MenuIcon) -> egui::Atom<'a> {
+    menu_icon_atom(menu.icon_texture(ui.ctx(), icon).as_ref())
+}
+
 /// Renders shell context menu entries; cascading shell submenus become egui
 /// submenus whose children are read from the shell on first open.
 fn draw_shell_menu_nodes(
     ui: &mut egui::Ui,
     menu: &ShellContextMenu,
+    level: &str,
     nodes: &[ShellMenuNode],
     hwnd: Option<HWND>,
     palette: &ThemePalette,
@@ -356,12 +384,14 @@ fn draw_shell_menu_nodes(
                 label,
                 disabled,
                 is_default,
+                icon,
             } => {
                 let mut text = egui::RichText::new(label);
                 if *is_default {
                     text = text.strong();
                 }
-                if ui.add_enabled(!disabled, egui::Button::new(text)).clicked() {
+                let button = egui::Button::new((shell_icon_atom(ui, menu, icon), text));
+                if ui.add_enabled(!disabled, button).clicked() {
                     if let Some(hwnd) = hwnd {
                         if let Err(err) = menu.invoke(hwnd, *id) {
                             eprintln!("Windows menu invoke failed: {}", err);
@@ -371,8 +401,11 @@ fn draw_shell_menu_nodes(
                 }
             }
             ShellMenuNode::Submenu(submenu) => {
-                let button =
-                    egui::Button::new(submenu.label.as_str()).right_text(regular::CARET_RIGHT);
+                let button = egui::Button::new((
+                    shell_icon_atom(ui, menu, &submenu.icon),
+                    submenu.label.as_str(),
+                ))
+                .right_text(regular::CARET_RIGHT);
                 // A submenu that turned out to be empty once populated stays
                 // visible but disabled, like an unavailable command.
                 if submenu.disabled || submenu.is_known_empty() {
@@ -399,12 +432,20 @@ fn draw_shell_menu_nodes(
                         .id_salt(("shell_context_submenu", submenu.key()))
                         .max_height(max_height)
                         .show(ui, |ui| {
-                            draw_shell_menu_nodes(ui, menu, &children, hwnd, palette);
+                            draw_shell_menu_nodes(
+                                ui,
+                                menu,
+                                &submenu.label,
+                                &children,
+                                hwnd,
+                                palette,
+                            );
                         });
                 });
             }
         }
     }
+    menu.log_icon_stats(level);
 }
 
 pub fn handle_draw_col_name(

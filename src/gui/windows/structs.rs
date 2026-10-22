@@ -83,6 +83,7 @@ pub enum SettingsTab {
     General,
     ViewDefaults,
     Hotkeys,
+    ContextMenu,
 }
 
 pub struct SidebarState {
