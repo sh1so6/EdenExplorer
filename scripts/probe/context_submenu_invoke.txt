@@ -1,0 +1,21 @@
+# Invoke a command inside a lazily populated submenu: Send to > Compressed (zip) folder.
+# Side effect: creates notes.zip next to notes.txt in the scratch folder only.
+# Run like context_submenu.txt (scratch folder as launch path). Coordinates are
+# for the dev machine's Japanese shell menu.
+size 1117 717
+wait_ms 1200
+click 340 124 right
+wait_ms 500
+move 450 450
+wheel -2000
+wait_ms 300
+move 400 373
+wait_ms 600
+shot out/ctx_invoke_0_sendto.png
+move 600 373
+move 630 483
+wait_ms 200
+click 630 483
+wait_ms 3000
+shot out/ctx_invoke_1_after.png
+quit
