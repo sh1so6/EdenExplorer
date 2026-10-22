@@ -4,6 +4,7 @@ use crate::core::launch::receive_copydata;
 use crate::gui::i18n::I18n;
 use crate::gui::theme::ThemePalette;
 use crate::gui::utils::clickable_windows_icon;
+use crate::gui::windows::shell_context_menu::forward_native_menu_message;
 use eframe::egui;
 use egui::Context;
 use egui_phosphor::regular;
@@ -276,6 +277,19 @@ unsafe extern "system" fn custom_wndproc(
     wparam: WPARAM,
     lparam: LPARAM,
 ) -> LRESULT {
+    // While a native shell context menu is tracked (TrackPopupMenuEx owned by
+    // this window), let it handle the menu messages shell extensions need:
+    // lazy submenus ("Send to", "Open with", ...), owner-drawn items and
+    // mnemonics. Unhandled messages fall through to the normal handling.
+    if matches!(
+        msg,
+        WM_INITMENUPOPUP | WM_DRAWITEM | WM_MEASUREITEM | WM_MENUCHAR
+    ) {
+        if let Some(result) = forward_native_menu_message(msg, wparam, lparam) {
+            return result;
+        }
+    }
+
     match msg {
         WM_COPYDATA => {
             if receive_copydata(lparam) {

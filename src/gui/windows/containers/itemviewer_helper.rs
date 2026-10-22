@@ -18,7 +18,7 @@ use crate::gui::windows::containers::structs::{
     ItemViewerColumnState, ItemViewerColumnWidths, ItemViewerFolderSizeState, ItemViewerLayout,
     ItemViewerNavBarAction, RenameState,
 };
-use crate::gui::windows::shell_context_menu::ShellContextMenu;
+use crate::gui::windows::shell_context_menu::{ShellContextMenu, ShellMenuNode};
 use crate::gui::windows::structs::{SettingsWindow, ThemeCustomizer};
 use eframe::egui;
 use egui::containers::{Popup, PopupCloseBehavior};
@@ -311,9 +311,12 @@ pub fn handle_context_menu_actions(
     {
         // The native mode owns the complete context menu. Close the egui
         // popup after the shell menu returns so only one menu is visible.
-        if let (Some(hwnd), Some(cache)) =
-            (hwnd, explorer_state.windows_context_menu_cache.as_ref())
-        {
+        // The menu is used for a single TrackPopupMenuEx session (like
+        // Explorer): shell extensions receive WM_INITMENUPOPUP again on every
+        // show, and some would append their items a second time to a reused
+        // HMENU.
+        let cache = explorer_state.windows_context_menu_cache.take();
+        if let (Some(hwnd), Some(cache)) = (hwnd, cache.as_ref()) {
             if let Err(err) = cache.menu.show_native(hwnd) {
                 eprintln!("Windows native menu failed: {}", err);
             }
@@ -322,27 +325,85 @@ pub fn handle_context_menu_actions(
         return;
     }
 
-    // Compatibility mode keeps Eden's menu and appends every Windows shell
-    // command directly below it, without a submenu or hover toggle.
+    // Compatibility mode keeps Eden's menu and appends the Windows shell
+    // menu below it, with its cascading submenus as egui submenus.
     ui.separator();
     if let Some(cache) = explorer_state.windows_context_menu_cache.as_ref() {
-        for item in cache.menu.items() {
-            if ui
-                .add_enabled(!item.disabled, egui::Button::new(&item.label))
-                .clicked()
-            {
-                if let Some(hwnd) = hwnd {
-                    if let Err(err) = cache.menu.invoke(hwnd, item.id) {
-                        eprintln!("Windows menu invoke failed: {}", err);
-                    }
-                }
-                ui.close();
-            }
-        }
+        draw_shell_menu_nodes(ui, &cache.menu, cache.menu.nodes(), hwnd, _palette);
     } else if hwnd.is_none() {
         ui.label(i18n.tr("contextmenu_windows_menu_available_missing"));
     } else {
         ui.label(i18n.tr("contextmenu_windows_menu_unavailable"));
+    }
+}
+
+/// Renders shell context menu entries; cascading shell submenus become egui
+/// submenus whose children are read from the shell on first open.
+fn draw_shell_menu_nodes(
+    ui: &mut egui::Ui,
+    menu: &ShellContextMenu,
+    nodes: &[ShellMenuNode],
+    hwnd: Option<HWND>,
+    palette: &ThemePalette,
+) {
+    for node in nodes {
+        match node {
+            ShellMenuNode::Separator => {
+                ui.separator();
+            }
+            ShellMenuNode::Command {
+                id,
+                label,
+                disabled,
+                is_default,
+            } => {
+                let mut text = egui::RichText::new(label);
+                if *is_default {
+                    text = text.strong();
+                }
+                if ui.add_enabled(!disabled, egui::Button::new(text)).clicked() {
+                    if let Some(hwnd) = hwnd {
+                        if let Err(err) = menu.invoke(hwnd, *id) {
+                            eprintln!("Windows menu invoke failed: {}", err);
+                        }
+                    }
+                    ui.close();
+                }
+            }
+            ShellMenuNode::Submenu(submenu) => {
+                let button =
+                    egui::Button::new(submenu.label.as_str()).right_text(regular::CARET_RIGHT);
+                // A submenu that turned out to be empty once populated stays
+                // visible but disabled, like an unavailable command.
+                if submenu.disabled || submenu.is_known_empty() {
+                    ui.add_enabled(false, button);
+                    continue;
+                }
+                egui::containers::menu::SubMenuButton::from_button(button).ui(ui, |ui| {
+                    // Submenus are separate popups: re-apply the menu styling.
+                    apply_eden_visual_overrides(ui, palette);
+                    apply_eden_text_overrides(ui, palette);
+                    // Populated on the first frame the submenu is open; later
+                    // frames reuse the cache unless the shell added items.
+                    let children = menu.submenu_children(submenu);
+                    if submenu.is_settling() {
+                        ui.ctx()
+                            .request_repaint_after(std::time::Duration::from_millis(100));
+                    }
+                    // The popup's Ui is only as tall as the popup was last
+                    // frame; lift that limit so the scroll area can grow when
+                    // the shell adds items (it still shrinks to its content).
+                    let max_height = ui.ctx().viewport_rect().height() * 0.6;
+                    ui.set_max_height(max_height);
+                    egui::ScrollArea::vertical()
+                        .id_salt(("shell_context_submenu", submenu.key()))
+                        .max_height(max_height)
+                        .show(ui, |ui| {
+                            draw_shell_menu_nodes(ui, menu, &children, hwnd, palette);
+                        });
+                });
+            }
+        }
     }
 }
 
