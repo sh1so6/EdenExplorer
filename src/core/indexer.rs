@@ -319,6 +319,10 @@ fn theme_cache_path() -> Option<PathBuf> {
     Some(app_data_dir()?.join("theme.bin"))
 }
 
+fn context_menu_settings_path() -> Option<PathBuf> {
+    Some(app_data_dir()?.join("context_menu.json"))
+}
+
 fn layout_settings_path() -> Option<PathBuf> {
     Some(app_data_dir()?.join("layout.json"))
 }
@@ -594,6 +598,40 @@ pub fn save_layout_settings(snapshot: &LayoutSettingsSnapshot) {
         None => return,
     };
     let _ = std::fs::create_dir_all(path.parent().unwrap());
+    if let Ok(data) = serde_json::to_string_pretty(snapshot) {
+        let _ = std::fs::write(path, data);
+    }
+}
+
+/// Shell context menu preferences, stored as JSON in `context_menu.json`
+/// (separate from the postcard `settings.bin`).
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct ContextMenuSettingsSnapshot {
+    /// Keys of hidden shell menu entries (`verb:<verb>` or
+    /// `label:<parent> > <label>`).
+    pub hidden: Vec<String>,
+    /// Display labels of hidden entries, so they can be listed (and shown
+    /// again) even when they are not part of the current menu.
+    pub labels: std::collections::BTreeMap<String, String>,
+}
+
+/// Loads the context menu preferences. Missing or unreadable files fall back
+/// to defaults.
+pub fn load_context_menu_settings() -> ContextMenuSettingsSnapshot {
+    context_menu_settings_path()
+        .and_then(|path| std::fs::read_to_string(path).ok())
+        .and_then(|data| serde_json::from_str::<ContextMenuSettingsSnapshot>(&data).ok())
+        .unwrap_or_default()
+}
+
+pub fn save_context_menu_settings(snapshot: &ContextMenuSettingsSnapshot) {
+    let Some(path) = context_menu_settings_path() else {
+        return;
+    };
+    if let Some(parent) = path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
     if let Ok(data) = serde_json::to_string_pretty(snapshot) {
         let _ = std::fs::write(path, data);
     }

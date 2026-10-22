@@ -15,6 +15,7 @@ use crate::gui::theme::ThemePalette;
 use crate::gui::utils::SortColumn;
 use crate::gui::windows::containers::enums::ItemViewerHeaderColumn;
 use crate::gui::windows::enums::SettingsAction;
+use crate::gui::windows::shell_context_menu;
 use crate::gui::windows::structs::{AppSettings, SettingsTab, SettingsWindow};
 use eframe::egui;
 use egui::RichText;
@@ -443,6 +444,107 @@ fn draw_view_defaults_tab(
     });
 
     changed.then_some(SettingsAction::ApplySettings)
+}
+
+/// Lists the Windows shell menu entries (from the most recently opened
+/// context menu, plus every hidden entry) with a checkbox each; unchecked
+/// entries are hidden from the shell menu. Changes are saved immediately.
+fn draw_context_menu_tab(ui: &mut egui::Ui, palette: &ThemePalette, i18n: &I18n) {
+    let seen = shell_context_menu::seen_entries();
+    let hidden = shell_context_menu::hidden_entries();
+
+    ui.add(
+        egui::Label::new(
+            RichText::new(i18n.tr("settings_contextmenu_entries_description"))
+                .color(palette.text_normal),
+        )
+        .wrap(),
+    );
+    ui.add_space(4.0);
+    ui.add_enabled_ui(!hidden.is_empty(), |ui| {
+        if eden_button(
+            ui,
+            palette,
+            &format!(
+                "{} {}",
+                regular::ARROW_COUNTER_CLOCKWISE,
+                i18n.tr("settings_contextmenu_entries_reset")
+            ),
+        )
+        .clicked()
+        {
+            shell_context_menu::reset_hidden_entries();
+        }
+    });
+    ui.add_space(8.0);
+
+    ui.group(|ui| {
+        ui.set_width(ui.available_width());
+        ui.label(
+            RichText::new(i18n.tr("settings_contextmenu_entries_recent"))
+                .strong()
+                .color(palette.text_header_section),
+        );
+        if seen.is_empty() {
+            ui.label(
+                RichText::new(i18n.tr("settings_contextmenu_entries_empty"))
+                    .color(palette.text_normal),
+            );
+        }
+        for (index, entry) in seen.iter().enumerate() {
+            let mut shown = !hidden.iter().any(|(key, _)| *key == entry.key);
+            ui.horizontal(|ui| {
+                ui.add_space(entry.depth as f32 * 20.0);
+                let label = if entry.is_submenu {
+                    format!("{} {}", entry.label, regular::CARET_RIGHT)
+                } else {
+                    entry.label.clone()
+                };
+                if setting_checkbox(
+                    ui,
+                    palette,
+                    &mut shown,
+                    RichText::new(label).color(palette.text_normal),
+                    ("settings_contextmenu_entry", index),
+                ) {
+                    shell_context_menu::set_entry_hidden(&entry.key, &entry.path_label, !shown);
+                }
+            });
+        }
+    });
+
+    // Hidden entries that are not part of the last menu (other file types,
+    // submenus not opened yet) stay listed so they can be shown again.
+    let other_hidden: Vec<&(String, String)> = hidden
+        .iter()
+        .filter(|(key, _)| !seen.iter().any(|entry| entry.key == *key))
+        .collect();
+    if !other_hidden.is_empty() {
+        ui.add_space(8.0);
+        ui.group(|ui| {
+            ui.set_width(ui.available_width());
+            ui.label(
+                RichText::new(i18n.tr("settings_contextmenu_entries_hidden"))
+                    .strong()
+                    .color(palette.text_header_section),
+            );
+            for (key, label) in other_hidden {
+                let mut shown = false;
+                ui.horizontal(|ui| {
+                    if setting_checkbox(
+                        ui,
+                        palette,
+                        &mut shown,
+                        RichText::new(label).color(palette.text_normal),
+                        ("settings_contextmenu_hidden_entry", key),
+                    ) && shown
+                    {
+                        shell_context_menu::set_entry_hidden(key, label, false);
+                    }
+                });
+            }
+        });
+    }
 }
 
 fn draw_general_tab(
@@ -1126,6 +1228,16 @@ pub fn draw_settings_window(
                 {
                     settings.selected_tab = SettingsTab::Hotkeys;
                 }
+                if eden_toggle_button(
+                    ui,
+                    palette,
+                    settings.selected_tab == SettingsTab::ContextMenu,
+                    &i18n.tr("settings_tab_context_menu"),
+                )
+                .clicked()
+                {
+                    settings.selected_tab = SettingsTab::ContextMenu;
+                }
             });
             ui.separator();
 
@@ -1141,6 +1253,11 @@ pub fn draw_settings_window(
                                 .collect();
                         }
                         draw_hotkeys_tab(ui, settings, palette, i18n);
+                        return;
+                    }
+
+                    if settings.selected_tab == SettingsTab::ContextMenu {
+                        draw_context_menu_tab(ui, palette, i18n);
                         return;
                     }
 
