@@ -18,6 +18,7 @@ use crate::gui::windows::containers::structs::{
     ItemViewerColumnState, ItemViewerColumnWidths, ItemViewerFolderSizeState, ItemViewerLayout,
     ItemViewerNavBarAction, RenameState,
 };
+use crate::gui::windows::eden_menu_entries::{self, EdenMenuEntry, EdenMenuSlot};
 use crate::gui::windows::shell_context_menu::{
     self, MENU_ICON_SIZE, MenuIcon, ShellContextMenu, ShellMenuNode,
 };
@@ -92,7 +93,103 @@ pub fn compute_layout(
     }
 }
 
-pub fn handle_context_menu_actions(
+/// Paths a context menu for `file` acts on: the selection when `file` is part
+/// of it, otherwise just `file` (a right-click selects it, as in Explorer).
+fn context_menu_paths(
+    file: &FileItem,
+    is_selected: bool,
+    explorer_state: &ExplorerState,
+) -> Vec<PathBuf> {
+    let mut paths: Vec<PathBuf> = if is_selected {
+        explorer_state.selected_paths.iter().cloned().collect()
+    } else {
+        vec![file.path.clone()]
+    };
+    paths.sort();
+    paths.dedup();
+    paths
+}
+
+/// The right-click menu of an item (list row, gallery tile). Call it on every
+/// frame the menu may be open.
+///
+/// A Shift+right-click shows the complete Windows menu (with the extended
+/// verbs, nothing hidden) natively instead, like Explorer, and the egui menu
+/// is not opened at all. Only the click itself is checked: pressing Shift
+/// while the egui menu is open keeps that menu. Drives and Recycle Bin items
+/// have no shell menu and always get the egui menu.
+#[allow(clippy::too_many_arguments)]
+pub fn show_item_context_menu(
+    response: &egui::Response,
+    i18n: &I18n,
+    file: &FileItem,
+    is_selected: bool,
+    paste_enabled: bool,
+    is_drive_view: bool,
+    is_recycle_bin_view: bool,
+    is_cut: bool,
+    action: &mut Option<ItemViewerAction>,
+    palette: &ThemePalette,
+    explorer_state: &mut ExplorerState,
+    hwnd: Option<HWND>,
+) {
+    if let Some(hwnd) = hwnd
+        && !is_drive_view
+        && !is_recycle_bin_view
+        && response.secondary_clicked()
+        && response.ctx.input(|i| i.modifiers.shift)
+    {
+        // Same selection update as the egui menu.
+        if !is_selected {
+            *action = Some(ItemViewerAction::ReplaceSelection(file.path.clone()));
+        }
+        // The native menu replaces any egui menu that is still open.
+        Popup::close_all(&response.ctx);
+        let paths = context_menu_paths(file, is_selected, explorer_state);
+        show_standard_shell_menu(&paths, hwnd);
+        return;
+    }
+
+    Popup::context_menu(response)
+        .close_behavior(PopupCloseBehavior::CloseOnClickOutside)
+        .show(|ui| {
+            egui::ScrollArea::vertical()
+                .max_height(ui.ctx().viewport_rect().height() * 0.75)
+                .show(ui, |ui| {
+                    handle_context_menu_actions(
+                        ui,
+                        i18n,
+                        file,
+                        is_selected,
+                        paste_enabled,
+                        is_drive_view,
+                        is_recycle_bin_view,
+                        is_cut,
+                        action,
+                        palette,
+                        explorer_state,
+                        hwnd,
+                    );
+                });
+        });
+}
+
+/// Builds a fresh standard (Shift+right-click) shell menu for `paths` and
+/// shows it natively; blocks until the menu is closed. The menu lives only
+/// for this one showing and is kept apart from the cached egui-mode menu.
+fn show_standard_shell_menu(paths: &[PathBuf], hwnd: HWND) {
+    match ShellContextMenu::standard_for_paths(paths, hwnd) {
+        Ok(menu) => {
+            if let Err(err) = menu.show_native(hwnd) {
+                eprintln!("Windows native menu failed: {}", err);
+            }
+        }
+        Err(err) => eprintln!("Windows menu load failed: {}", err),
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn handle_context_menu_actions(
     ui: &mut egui::Ui,
     i18n: &I18n,
     file: &FileItem,
@@ -104,7 +201,6 @@ pub fn handle_context_menu_actions(
     action: &mut Option<ItemViewerAction>,
     _palette: &ThemePalette,
     explorer_state: &mut ExplorerState,
-    settings_window: &SettingsWindow,
     hwnd: Option<HWND>,
 ) {
     // Apply context-menu-specific typography
@@ -116,13 +212,7 @@ pub fn handle_context_menu_actions(
         *action = Some(ItemViewerAction::ReplaceSelection(file.path.clone()));
     }
 
-    let mut context_paths: Vec<PathBuf> = if is_selected {
-        explorer_state.selected_paths.iter().cloned().collect()
-    } else {
-        vec![file.path.clone()]
-    };
-    context_paths.sort();
-    context_paths.dedup();
+    let context_paths = context_menu_paths(file, is_selected, explorer_state);
 
     if is_drive_view {
         if ui.button(i18n.tr("properties")).clicked() {
@@ -175,106 +265,25 @@ pub fn handle_context_menu_actions(
 
     // --- NORMAL FILE VIEW ---
 
-    // Determine if "Open in new tab" should be enabled
-    // Enable only if a single path is selected
-    let enable_open_in_tab = context_paths.len() == 1;
-
-    if ui
-        .add_enabled(enable_open_in_tab, menu_item(i18n.tr("inputs_newtab")))
-        .clicked()
-    {
-        if let Some(path) = context_paths.first() {
-            *action = Some(ItemViewerAction::OpenInNewTab(path.clone()));
+    // Eden's own entries, minus the ones hidden in the settings.
+    let eden_slots = eden_menu_entries::visible_slots();
+    for slot in &eden_slots {
+        let entry = match slot {
+            EdenMenuSlot::Separator => {
+                ui.separator();
+                continue;
+            }
+            EdenMenuSlot::Entry(entry) => *entry,
+        };
+        if let Some(entry_action) =
+            draw_eden_menu_entry(ui, i18n, entry, file, &context_paths, is_cut, paste_enabled)
+        {
+            *action = Some(entry_action);
             ui.close();
         }
     }
 
-    if ui
-        .add_enabled(
-            enable_open_in_tab && context_paths.first().is_some_and(|p| p.is_dir()),
-            menu_item(i18n.tr("inputs_opensplit")),
-        )
-        .clicked()
-    {
-        if let Some(path) = context_paths.first() {
-            *action = Some(ItemViewerAction::OpenInSplitView(path.clone()));
-            ui.close();
-        }
-    }
-
-    let label = if context_paths.len() == 1 {
-        i18n.tr("open_default_program")
-    } else {
-        i18n.tr("open_files_default_program")
-    };
-
-    if ui.add(menu_item(i18n.tr("tag_manage"))).clicked() {
-        *action = Some(ItemViewerAction::Context(
-            ItemViewerContextAction::ManageTags(context_paths.clone()),
-        ));
-        ui.close();
-    }
-
-    let all_files = context_paths.iter().all(|path| !path.is_dir());
-
-    if ui.add_enabled(all_files, menu_item(label)).clicked() {
-        let paths: Vec<PathBuf> = explorer_state.selected_paths.iter().cloned().collect();
-        *action = Some(ItemViewerAction::OpenWithDefault(paths));
-        ui.close();
-    }
-
-    ui.separator();
-
-    if ui
-        .add_enabled(!is_cut, menu_item(i18n.tr("inputs_cut")))
-        .clicked()
-    {
-        *action = Some(ItemViewerAction::Context(ItemViewerContextAction::Cut(
-            context_paths.clone(),
-        )));
-        ui.close();
-    }
-    if ui.add(menu_item(i18n.tr("inputs_copy"))).clicked() {
-        *action = Some(ItemViewerAction::Context(ItemViewerContextAction::Copy(
-            context_paths.clone(),
-        )));
-        ui.close();
-    }
-    if ui.add(menu_item(i18n.tr("inputs_copy_path"))).clicked() {
-        *action = Some(ItemViewerAction::Context(
-            ItemViewerContextAction::CopyPath(context_paths.clone()),
-        ));
-        ui.close();
-    }
-    if ui
-        .add_enabled(paste_enabled, menu_item(i18n.tr("inputs_paste")))
-        .clicked()
-    {
-        *action = Some(ItemViewerAction::Context(ItemViewerContextAction::Paste));
-        ui.close();
-    }
-
-    if ui.add(menu_item(i18n.tr("inputs_rename"))).clicked() {
-        *action = Some(ItemViewerAction::StartEdit(file.path.clone()));
-        ui.close();
-    }
-
-    if ui.add(menu_item(i18n.tr("inputs_delete"))).clicked() {
-        *action = Some(ItemViewerAction::Context(ItemViewerContextAction::Delete(
-            context_paths.clone(),
-        )));
-        ui.close();
-    }
-
-    // Properties (multi-select aware)
-    if ui.add(menu_item(i18n.tr("properties"))).clicked() {
-        *action = Some(ItemViewerAction::Context(
-            ItemViewerContextAction::Properties(context_paths.clone()),
-        ));
-        ui.close();
-    }
-
-    let selected_paths = context_paths.clone();
+    let selected_paths = context_paths;
     let cache_miss = explorer_state
         .windows_context_menu_cache
         .as_ref()
@@ -305,35 +314,84 @@ pub fn handle_context_menu_actions(
         }
     }
 
-    if settings_window
-        .current_settings
-        .windows_context_menu_enabled
-    {
-        // The native mode owns the complete context menu. Close the egui
-        // popup after the shell menu returns so only one menu is visible.
-        // The menu is used for a single TrackPopupMenuEx session (like
-        // Explorer): shell extensions receive WM_INITMENUPOPUP again on every
-        // show, and some would append their items a second time to a reused
-        // HMENU.
-        let cache = explorer_state.windows_context_menu_cache.take();
-        if let (Some(hwnd), Some(cache)) = (hwnd, cache.as_ref()) {
-            if let Err(err) = cache.menu.show_native(hwnd) {
-                eprintln!("Windows native menu failed: {}", err);
-            }
-        }
-        ui.close();
-        return;
+    // The Windows shell menu follows Eden's entries, with its cascading
+    // submenus as egui submenus.
+    if !eden_slots.is_empty() {
+        ui.separator();
     }
-
-    // Compatibility mode keeps Eden's menu and appends the Windows shell
-    // menu below it, with its cascading submenus as egui submenus.
-    ui.separator();
     if let Some(cache) = explorer_state.windows_context_menu_cache.as_ref() {
         draw_shell_menu_nodes(ui, &cache.menu, "root", cache.menu.nodes(), hwnd, _palette);
     } else if hwnd.is_none() {
         ui.label(i18n.tr("contextmenu_windows_menu_available_missing"));
     } else {
         ui.label(i18n.tr("contextmenu_windows_menu_unavailable"));
+    }
+}
+
+/// Draws one of Eden's item-menu entries; returns its action when clicked.
+fn draw_eden_menu_entry(
+    ui: &mut egui::Ui,
+    i18n: &I18n,
+    entry: EdenMenuEntry,
+    file: &FileItem,
+    context_paths: &[PathBuf],
+    is_cut: bool,
+    paste_enabled: bool,
+) -> Option<ItemViewerAction> {
+    let single = context_paths.len() == 1;
+    let (enabled, label) = match entry {
+        EdenMenuEntry::OpenInNewTab => (single, i18n.tr(entry.label_key())),
+        EdenMenuEntry::OpenInSplitView => (
+            single && context_paths.first().is_some_and(|p| p.is_dir()),
+            i18n.tr(entry.label_key()),
+        ),
+        EdenMenuEntry::OpenWithDefault => (
+            context_paths.iter().all(|path| !path.is_dir()),
+            if single {
+                i18n.tr(entry.label_key())
+            } else {
+                i18n.tr("open_files_default_program")
+            },
+        ),
+        EdenMenuEntry::Cut => (!is_cut, i18n.tr(entry.label_key())),
+        EdenMenuEntry::Paste => (paste_enabled, i18n.tr(entry.label_key())),
+        EdenMenuEntry::ManageTags
+        | EdenMenuEntry::Copy
+        | EdenMenuEntry::CopyPath
+        | EdenMenuEntry::Rename
+        | EdenMenuEntry::Delete
+        | EdenMenuEntry::Properties => (true, i18n.tr(entry.label_key())),
+    };
+    if !ui.add_enabled(enabled, menu_item(label)).clicked() {
+        return None;
+    }
+
+    let paths = || context_paths.to_vec();
+    let first = context_paths.first().cloned();
+    match entry {
+        EdenMenuEntry::OpenInNewTab => first.map(ItemViewerAction::OpenInNewTab),
+        EdenMenuEntry::OpenInSplitView => first.map(ItemViewerAction::OpenInSplitView),
+        EdenMenuEntry::ManageTags => Some(ItemViewerAction::Context(
+            ItemViewerContextAction::ManageTags(paths()),
+        )),
+        EdenMenuEntry::OpenWithDefault => Some(ItemViewerAction::OpenWithDefault(paths())),
+        EdenMenuEntry::Cut => Some(ItemViewerAction::Context(ItemViewerContextAction::Cut(
+            paths(),
+        ))),
+        EdenMenuEntry::Copy => Some(ItemViewerAction::Context(ItemViewerContextAction::Copy(
+            paths(),
+        ))),
+        EdenMenuEntry::CopyPath => Some(ItemViewerAction::Context(
+            ItemViewerContextAction::CopyPath(paths()),
+        )),
+        EdenMenuEntry::Paste => Some(ItemViewerAction::Context(ItemViewerContextAction::Paste)),
+        EdenMenuEntry::Rename => Some(ItemViewerAction::StartEdit(file.path.clone())),
+        EdenMenuEntry::Delete => Some(ItemViewerAction::Context(ItemViewerContextAction::Delete(
+            paths(),
+        ))),
+        EdenMenuEntry::Properties => Some(ItemViewerAction::Context(
+            ItemViewerContextAction::Properties(paths()),
+        )),
     }
 }
 

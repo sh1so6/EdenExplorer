@@ -11,8 +11,8 @@ use crate::gui::theme::ThemePalette;
 use crate::gui::utils::{SortColumn, truncate_item_text};
 use crate::gui::windows::containers::enums::{ItemViewerAction, ItemViewerContextAction};
 use crate::gui::windows::containers::itemviewer_helper::{
-    draw_empty_item_viewer_area, handle_context_menu_actions, handle_editing_file_name,
-    handle_keyboard_navigation, handle_row_click,
+    draw_empty_item_viewer_area, handle_editing_file_name, handle_keyboard_navigation,
+    handle_row_click, show_item_context_menu,
 };
 use crate::gui::windows::containers::structs::{
     DragState, ExplorerState, GalleryState, GalleryThumbnailSize, RenameState,
@@ -55,7 +55,7 @@ pub fn draw_gallery_view(
     hovered_drop_target_out: &mut Option<PathBuf>,
     hovered_drop_target_rect_out: &mut Option<egui::Rect>,
     _theme_customizer_window: &mut ThemeCustomizer,
-    settings_window: &mut SettingsWindow,
+    _settings_window: &mut SettingsWindow,
     hwnd: Option<HWND>,
     modal_input_blocked: bool,
     is_focused: bool,
@@ -274,29 +274,20 @@ pub fn draw_gallery_view(
                             action = Some(ItemViewerAction::OpenInNewTab(file.path.clone()));
                         }
 
-                        Popup::context_menu(&response)
-                            .close_behavior(PopupCloseBehavior::CloseOnClickOutside)
-                            .show(|ui| {
-                                egui::ScrollArea::vertical()
-                                    .max_height(ui.ctx().viewport_rect().height() * 0.75)
-                                    .show(ui, |ui| {
-                                        handle_context_menu_actions(
-                                            ui,
-                                            i18n,
-                                            file,
-                                            explorer_state.selected_paths.contains(&file.path),
-                                            paste_enabled,
-                                            false,
-                                            false,
-                                            is_cut_mode && clipboard_set.contains(&file.path),
-                                            &mut action,
-                                            palette,
-                                            explorer_state,
-                                            settings_window,
-                                            hwnd,
-                                        );
-                                    });
-                            });
+                        show_item_context_menu(
+                            &response,
+                            i18n,
+                            file,
+                            explorer_state.selected_paths.contains(&file.path),
+                            paste_enabled,
+                            false,
+                            false,
+                            is_cut_mode && clipboard_set.contains(&file.path),
+                            &mut action,
+                            palette,
+                            explorer_state,
+                            hwnd,
+                        );
                     }
                 }
 

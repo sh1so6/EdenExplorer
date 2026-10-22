@@ -111,7 +111,6 @@ impl Default for MainWindow {
             folder_scanning_enabled,
             show_hidden_files_folders,
             show_item_viewer_icons,
-            windows_context_menu_enabled,
             window_size_mode,
             start_path,
             saved_theme,
@@ -134,7 +133,6 @@ impl Default for MainWindow {
             folder_scanning_enabled,
             show_hidden_files_folders,
             show_item_viewer_icons,
-            windows_context_menu_enabled,
             window_size_mode: window_size_mode.clone(),
             start_path: Some(start_path.clone()), // important
             pinned_tabs: pinned_tabs.clone(),

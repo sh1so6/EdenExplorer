@@ -19,9 +19,9 @@ use windows::Win32::UI::Controls::{
 };
 use windows::Win32::UI::Shell::Common::ITEMIDLIST;
 use windows::Win32::UI::Shell::{
-    CMF_NORMAL, CMINVOKECOMMANDINFO, CMINVOKECOMMANDINFOEX, DEFCONTEXTMENU, GCS_VERBW,
-    IContextMenu, IContextMenu2, IContextMenu3, ILCreateFromPathW, ILFindLastID, IShellFolder,
-    SHBindToParent, SHCreateDefaultContextMenu,
+    CMF_EXTENDEDVERBS, CMF_NORMAL, CMINVOKECOMMANDINFO, CMINVOKECOMMANDINFOEX, DEFCONTEXTMENU,
+    GCS_VERBW, IContextMenu, IContextMenu2, IContextMenu3, ILCreateFromPathW, ILFindLastID,
+    IShellFolder, SHBindToParent, SHCreateDefaultContextMenu,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
     CreatePopupMenu, DeleteMenu, DestroyMenu, GetMenuItemCount, GetMenuItemInfoW, HMENU,
@@ -74,9 +74,17 @@ struct MenuPrefs {
     hidden: HashSet<String>,
     /// Display labels of hidden keys (persisted with them).
     labels: std::collections::BTreeMap<String, String>,
-    /// Bumped on every change, so cached menus know they are outdated.
+    /// Bumped on every change of `hidden`, so cached shell menus know they
+    /// are outdated.
     version: u64,
     seen: Vec<SeenMenuEntry>,
+    /// Hidden entries of Eden's own item menu (`eden:` keys, see
+    /// [`crate::gui::windows::eden_menu_entries`]). Kept apart from `hidden`
+    /// so they never show up among the shell entries in the settings.
+    eden_hidden: HashSet<String>,
+    /// Bumped on every change of `eden_hidden`. Separate from `version`:
+    /// toggling Eden's entries must not rebuild the cached shell menu.
+    eden_version: u64,
 }
 
 impl MenuPrefs {
@@ -87,18 +95,34 @@ impl MenuPrefs {
             labels: snapshot.labels,
             version: 0,
             seen: Vec::new(),
+            eden_hidden: snapshot.eden_hidden.into_iter().collect(),
+            eden_version: 0,
         }
     }
 
-    fn save(&mut self) {
+    /// Saves after a change of the shell entries.
+    fn save_shell(&mut self) {
         self.version += 1;
+        self.save();
+    }
+
+    /// Saves after a change of Eden's entries.
+    fn save_eden(&mut self) {
+        self.eden_version += 1;
+        self.save();
+    }
+
+    fn save(&mut self) {
         let mut hidden: Vec<String> = self.hidden.iter().cloned().collect();
         hidden.sort();
         let hidden_keys = &self.hidden;
         self.labels.retain(|key, _| hidden_keys.contains(key));
+        let mut eden_hidden: Vec<String> = self.eden_hidden.iter().cloned().collect();
+        eden_hidden.sort();
         save_context_menu_settings(&crate::core::indexer::ContextMenuSettingsSnapshot {
             hidden,
             labels: self.labels.clone(),
+            eden_hidden,
         });
     }
 }
@@ -131,17 +155,53 @@ pub fn set_entry_hidden(key: &str, path_label: &str, hidden: bool) {
             prefs.hidden.remove(key)
         };
         if changed {
-            prefs.save();
+            prefs.save_shell();
         }
     });
 }
 
-/// Shows every hidden entry again.
+/// Shows every hidden shell entry again.
 pub fn reset_hidden_entries() {
     with_prefs(|prefs| {
         if !prefs.hidden.is_empty() {
             prefs.hidden.clear();
-            prefs.save();
+            prefs.save_shell();
+        }
+    });
+}
+
+/// Changes whenever the set of hidden Eden entries changes (independent of
+/// [`hidden_entries_version`]).
+pub fn eden_entries_version() -> u64 {
+    with_prefs(|prefs| prefs.eden_version)
+}
+
+/// Keys of the hidden Eden item-menu entries.
+pub fn hidden_eden_entries() -> HashSet<String> {
+    with_prefs(|prefs| prefs.eden_hidden.clone())
+}
+
+/// Hides or shows one of Eden's own item-menu entries and saves the
+/// preference immediately. Does not invalidate cached shell menus.
+pub fn set_eden_entry_hidden(key: &str, hidden: bool) {
+    with_prefs(|prefs| {
+        let changed = if hidden {
+            prefs.eden_hidden.insert(key.to_string())
+        } else {
+            prefs.eden_hidden.remove(key)
+        };
+        if changed {
+            prefs.save_eden();
+        }
+    });
+}
+
+/// Shows every hidden Eden entry again.
+pub fn reset_hidden_eden_entries() {
+    with_prefs(|prefs| {
+        if !prefs.eden_hidden.is_empty() {
+            prefs.eden_hidden.clear();
+            prefs.save_eden();
         }
     });
 }
@@ -614,7 +674,8 @@ fn normalize_native_separators(menu: HMENU) {
 #[derive(Clone)]
 struct ActiveNativeMenu {
     handler: MenuMsgHandler,
-    pruner: Rc<NativePruner>,
+    /// `None` for the unfiltered standard menu.
+    pruner: Option<Rc<NativePruner>>,
 }
 
 thread_local! {
@@ -662,9 +723,11 @@ pub fn forward_native_menu_message(msg: u32, wparam: WPARAM, lparam: LPARAM) -> 
     let active =
         ACTIVE_NATIVE_MENU.with(|slot| slot.try_borrow().ok().and_then(|active| active.clone()))?;
     let result = active.handler.handle(msg, wparam, lparam);
-    if msg == WM_INITMENUPOPUP {
+    if msg == WM_INITMENUPOPUP
+        && let Some(pruner) = &active.pruner
+    {
         // The shell has populated the submenu now; drop hidden entries.
-        active.pruner.prune(HMENU(wparam.0 as *mut _));
+        pruner.prune(HMENU(wparam.0 as *mut _));
     }
     let result = result?;
 
@@ -698,13 +761,50 @@ pub struct ShellContextMenu {
     parent_pidl: *mut ITEMIDLIST,
     /// [`hidden_entries_version`] the node tree was filtered with.
     hidden_version: u64,
+    kind: ShellMenuKind,
     /// Submenus removed by the native mode's pruning (destroyed on drop).
     detached_submenus: RefCell<Vec<HMENU>>,
     icon_stats: Cell<IconLoadStats>,
 }
 
+/// How a [`ShellContextMenu`] is built.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ShellMenuKind {
+    /// `CMF_NORMAL`, hidden entries removed, node tree read for the egui
+    /// menu and the entries recorded for the settings page.
+    Filtered,
+    /// `CMF_NORMAL | CMF_EXTENDEDVERBS` (Explorer's Shift+right-click menu),
+    /// unfiltered and only shown natively: no node tree, nothing recorded
+    /// (extended-only verbs would otherwise flood the settings list).
+    Standard,
+}
+
+impl ShellMenuKind {
+    fn query_flags(self) -> u32 {
+        match self {
+            Self::Filtered => CMF_NORMAL,
+            Self::Standard => CMF_NORMAL | CMF_EXTENDEDVERBS,
+        }
+    }
+}
+
 impl ShellContextMenu {
+    /// The shell menu for Eden's egui context menu: hidden entries removed,
+    /// its entries listed on the settings page.
     pub fn for_paths(paths: &[PathBuf], hwnd: HWND) -> windows::core::Result<Self> {
+        Self::build(paths, hwnd, ShellMenuKind::Filtered)
+    }
+
+    /// The complete Windows menu including the extended verbs, as Explorer
+    /// shows it on Shift+right-click. Nothing is hidden. Only for
+    /// [`Self::show_native`]: the egui node tree is not read ([`Self::nodes`]
+    /// is empty). Build a new one for every showing; shell extensions may
+    /// append their items again to a reused HMENU.
+    pub fn standard_for_paths(paths: &[PathBuf], hwnd: HWND) -> windows::core::Result<Self> {
+        Self::build(paths, hwnd, ShellMenuKind::Standard)
+    }
+
+    fn build(paths: &[PathBuf], hwnd: HWND, kind: ShellMenuKind) -> windows::core::Result<Self> {
         let started = Instant::now();
         let parent =
             shared_parent(paths).ok_or_else(|| Error::from(HRESULT(0x80004005u32 as i32)))?;
@@ -740,6 +840,7 @@ impl ShellContextMenu {
             full_pidls,
             parent_pidl,
             hidden_version: hidden_entries_version(),
+            kind,
             detached_submenus: RefCell::new(Vec::new()),
             icon_stats: Cell::new(IconLoadStats::default()),
         };
@@ -753,10 +854,21 @@ impl ShellContextMenu {
                 0,
                 CONTEXT_MENU_ID_BASE,
                 CONTEXT_MENU_ID_MAX,
-                CMF_NORMAL,
+                kind.query_flags(),
             );
         }
         let queried = started.elapsed();
+
+        if kind == ShellMenuKind::Standard {
+            debug_log(format_args!(
+                "standard (extended verbs): {} items in {:.2} ms (create {:.2} ms, QueryContextMenu {:.2} ms)",
+                unsafe { GetMenuItemCount(Some(this.menu)) },
+                started.elapsed().as_secs_f64() * 1000.0,
+                created.as_secs_f64() * 1000.0,
+                (queried - created).as_secs_f64() * 1000.0,
+            ));
+            return Ok(this);
+        }
 
         let mut stats = CollectStats::default();
         let level = LevelContext {
@@ -984,9 +1096,12 @@ impl ShellContextMenu {
     ///
     /// While the menu is tracked, the owner window's procedure forwards menu
     /// messages to this menu (see [`forward_native_menu_message`]), so lazily
-    /// populated and owner-drawn submenus work as in Explorer. Hidden entries
-    /// are removed from the root before showing it and from submenus when
-    /// the shell has populated them.
+    /// populated and owner-drawn submenus work as in Explorer. For a
+    /// [`Self::for_paths`] menu, hidden entries are removed from the root
+    /// before showing it and from submenus when the shell has populated them;
+    /// a [`Self::standard_for_paths`] menu is shown complete.
+    ///
+    /// Show a menu at most once (see [`Self::standard_for_paths`]).
     pub fn show_native(&self, hwnd: HWND) -> windows::core::Result<()> {
         // A modal native menu at the real cursor would hijack the user's session.
         if crate::core::probe_active() {
@@ -998,16 +1113,21 @@ impl ShellContextMenu {
         }
         // No early return between pruning and handing the detached submenus
         // over to `self` (destroyed in `Drop`, after `invoke`).
-        let pruner = Rc::new(NativePruner::new(
-            self.context_menu.clone(),
-            self.id_base,
-            self.menu,
-        ));
-        pruner.prune(self.menu);
+        let pruner = (self.kind == ShellMenuKind::Filtered).then(|| {
+            Rc::new(NativePruner::new(
+                self.context_menu.clone(),
+                self.id_base,
+                self.menu,
+            ))
+        });
+        if let Some(pruner) = &pruner {
+            pruner.prune(self.menu);
+        }
+        let started = Instant::now();
         let command = {
             let _active = ActiveNativeMenuGuard::install(ActiveNativeMenu {
                 handler: self.handler.clone(),
-                pruner: Rc::clone(&pruner),
+                pruner: pruner.clone(),
             });
             unsafe {
                 TrackPopupMenuEx(
@@ -1020,10 +1140,17 @@ impl ShellContextMenu {
                 )
             }
         };
-        self.detached_submenus
-            .borrow_mut()
-            .extend(pruner.detached.borrow_mut().drain(..));
+        if let Some(pruner) = &pruner {
+            self.detached_submenus
+                .borrow_mut()
+                .extend(pruner.detached.borrow_mut().drain(..));
+        }
         let command = command.0 as u32;
+        debug_log(format_args!(
+            "native {:?} menu closed after {:.0} ms, command {command}",
+            self.kind,
+            started.elapsed().as_secs_f64() * 1000.0
+        ));
         if command != 0 {
             self.invoke(hwnd, command)?;
         }
@@ -1716,6 +1843,29 @@ mod tests {
             entry_key(None, &["送る".to_string()], "ドキュメント"),
             "label:送る > ドキュメント"
         );
+    }
+
+    #[test]
+    fn eden_keys_cannot_collide_with_shell_keys() {
+        use crate::gui::windows::eden_menu_entries::{EDEN_KEY_PREFIX, EdenMenuEntry};
+        // Shell keys always start with `verb:` or `label:`, whatever the
+        // verb or label is (even one that looks like an Eden key).
+        for (verb, parents, label) in [
+            (Some("eden:copy"), vec![], "x"),
+            (None, vec![], "eden:copy"),
+            (None, vec!["eden:copy".to_string()], "x"),
+            (Some("copy"), vec![], "Copy"),
+        ] {
+            let key = entry_key(verb, &parents, label);
+            assert!(
+                key.starts_with("verb:") || key.starts_with("label:"),
+                "{key}"
+            );
+            assert!(!key.starts_with(EDEN_KEY_PREFIX), "{key}");
+        }
+        for entry in EdenMenuEntry::ALL {
+            assert!(!entry.key().starts_with("verb:") && !entry.key().starts_with("label:"));
+        }
     }
 
     #[test]

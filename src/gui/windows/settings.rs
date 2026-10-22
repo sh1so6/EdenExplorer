@@ -14,6 +14,7 @@ use crate::gui::i18n::I18n;
 use crate::gui::theme::ThemePalette;
 use crate::gui::utils::SortColumn;
 use crate::gui::windows::containers::enums::ItemViewerHeaderColumn;
+use crate::gui::windows::eden_menu_entries::EdenMenuEntry;
 use crate::gui::windows::enums::SettingsAction;
 use crate::gui::windows::shell_context_menu;
 use crate::gui::windows::structs::{AppSettings, SettingsTab, SettingsWindow};
@@ -259,7 +260,6 @@ impl Default for AppSettings {
             folder_scanning_enabled: true,
             show_hidden_files_folders: true,
             show_item_viewer_icons: true,
-            windows_context_menu_enabled: false,
             start_path: Some(PathBuf::from(MY_PC_PATH)),
             window_size_mode: WindowSizeMode::default(),
             pinned_tabs: Vec::new(),
@@ -446,10 +446,92 @@ fn draw_view_defaults_tab(
     changed.then_some(SettingsAction::ApplySettings)
 }
 
-/// Lists the Windows shell menu entries (from the most recently opened
-/// context menu, plus every hidden entry) with a checkbox each; unchecked
-/// entries are hidden from the shell menu. Changes are saved immediately.
+/// Lists Eden's own item-menu entries and the Windows shell menu entries
+/// (from the most recently opened context menu, plus every hidden entry)
+/// with a checkbox each; unchecked entries are hidden from the item menu.
+/// Changes are saved immediately.
 fn draw_context_menu_tab(ui: &mut egui::Ui, palette: &ThemePalette, i18n: &I18n) {
+    ui.add(
+        egui::Label::new(
+            RichText::new(format!(
+                "{} {}",
+                regular::INFO,
+                i18n.tr("settings_contextmenu_shift_hint")
+            ))
+            .color(palette.text_normal),
+        )
+        .wrap(),
+    );
+    ui.add_space(12.0);
+
+    draw_eden_menu_entries_section(ui, palette, i18n);
+    ui.add_space(16.0);
+
+    ui.label(
+        RichText::new(i18n.tr("settings_contextmenu_windows_section"))
+            .strong()
+            .color(palette.text_header_section),
+    );
+    ui.add_space(4.0);
+    draw_shell_menu_entries_section(ui, palette, i18n);
+}
+
+/// Checkboxes for Eden's own entries ([`EdenMenuEntry::ALL`]).
+fn draw_eden_menu_entries_section(ui: &mut egui::Ui, palette: &ThemePalette, i18n: &I18n) {
+    let hidden = shell_context_menu::hidden_eden_entries();
+
+    ui.label(
+        RichText::new(i18n.tr("settings_contextmenu_eden_section"))
+            .strong()
+            .color(palette.text_header_section),
+    );
+    ui.add_space(4.0);
+    ui.add(
+        egui::Label::new(
+            RichText::new(i18n.tr("settings_contextmenu_eden_description"))
+                .color(palette.text_normal),
+        )
+        .wrap(),
+    );
+    ui.add_space(4.0);
+    ui.add_enabled_ui(!hidden.is_empty(), |ui| {
+        if eden_button(
+            ui,
+            palette,
+            &format!(
+                "{} {}",
+                regular::ARROW_COUNTER_CLOCKWISE,
+                i18n.tr("settings_contextmenu_eden_reset")
+            ),
+        )
+        .clicked()
+        {
+            shell_context_menu::reset_hidden_eden_entries();
+        }
+    });
+    ui.add_space(8.0);
+
+    ui.group(|ui| {
+        ui.set_width(ui.available_width());
+        for entry in EdenMenuEntry::ALL {
+            let mut shown = !hidden.contains(entry.key());
+            ui.horizontal(|ui| {
+                if setting_checkbox(
+                    ui,
+                    palette,
+                    &mut shown,
+                    RichText::new(i18n.tr(entry.label_key())).color(palette.text_normal),
+                    ("settings_contextmenu_eden_entry", entry.key()),
+                ) {
+                    shell_context_menu::set_eden_entry_hidden(entry.key(), !shown);
+                }
+            });
+        }
+    });
+}
+
+/// Checkboxes for the Windows shell menu entries.
+fn draw_shell_menu_entries_section(ui: &mut egui::Ui, palette: &ThemePalette, i18n: &I18n) {
     let seen = shell_context_menu::seen_entries();
     let hidden = shell_context_menu::hidden_entries();
 
@@ -662,19 +744,6 @@ fn draw_general_tab(
             ) {
                 action = Some(SettingsAction::ApplySettings);
             }
-        });
-        ui.add_space(8.0);
-        ui.horizontal(|ui| {
-            if setting_checkbox(
-                ui,
-                palette,
-                &mut settings.current_settings.windows_context_menu_enabled,
-                RichText::new(&i18n.tr("settings_contextmenu_enable")).color(palette.text_normal),
-                "settings_contextmenu_enable",
-            ) {
-                action = Some(SettingsAction::ApplySettings);
-            }
-            info_icon(ui, &i18n.tr("tooltip_settings_contextmenu"), palette);
         });
         ui.add_space(8.0);
         // Date Style Section

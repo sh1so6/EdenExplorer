@@ -39,8 +39,12 @@ struct AppSettingsSnapshot {
     show_hidden_files_folders: bool,
     #[serde(default = "default_show_item_viewer_icons")]
     show_item_viewer_icons: bool,
-    #[serde(default)]
-    windows_context_menu_enabled: bool,
+    /// Retired "Use Native Context Menu" setting. postcard/bincode are
+    /// positional, so the slot must stay for old `settings.bin` files (and
+    /// older Eden builds) to keep loading; it is ignored on load and always
+    /// written as `false`.
+    #[serde(default, rename = "windows_context_menu_enabled")]
+    legacy_windows_context_menu_enabled: bool,
     window_size_mode: WindowSizeMode,
     pub start_path: Option<PathBuf>,
     theme: Option<String>,
@@ -109,8 +113,9 @@ fn default_gallery_thumbnail_size() -> GalleryThumbnailSize {
 #[derive(Serialize, Deserialize)]
 struct LegacyAppSettingsSnapshot {
     folder_scanning_enabled: bool,
-    #[serde(default)]
-    windows_context_menu_enabled: bool,
+    /// Retired setting, see [`AppSettingsSnapshot`].
+    #[serde(default, rename = "windows_context_menu_enabled")]
+    legacy_windows_context_menu_enabled: bool,
     window_size_mode: LegacyWindowSizeMode,
     pub start_path: Option<PathBuf>,
     theme: Option<String>,
@@ -130,7 +135,7 @@ impl From<LegacyAppSettingsSnapshot> for AppSettingsSnapshot {
             folder_scanning_enabled: legacy.folder_scanning_enabled,
             show_hidden_files_folders: true,
             show_item_viewer_icons: true,
-            windows_context_menu_enabled: legacy.windows_context_menu_enabled,
+            legacy_windows_context_menu_enabled: false,
             window_size_mode: legacy.window_size_mode.into(),
             start_path: legacy.start_path,
             theme: legacy.theme,
@@ -395,7 +400,6 @@ pub fn load_app_settings() -> (
     bool,
     bool,
     bool,
-    bool,
     WindowSizeMode,
     PathBuf,
     Option<String>,
@@ -434,7 +438,6 @@ pub fn load_app_settings() -> (
         snapshot.folder_scanning_enabled,
         snapshot.show_hidden_files_folders,
         snapshot.show_item_viewer_icons,
-        snapshot.windows_context_menu_enabled,
         snapshot.window_size_mode,
         snapshot.start_path.unwrap_or(default_path),
         snapshot.theme,
@@ -460,7 +463,6 @@ fn default_app_settings(
     bool,
     bool,
     bool,
-    bool,
     WindowSizeMode,
     PathBuf,
     Option<String>,
@@ -482,7 +484,6 @@ fn default_app_settings(
         true,
         true,
         true,
-        false,
         WindowSizeMode::default(),
         default_path,
         None,
@@ -506,7 +507,6 @@ pub fn save_app_settings(
     folder_scanning_enabled: bool,
     show_hidden_files_folders: bool,
     show_item_viewer_icons: bool,
-    windows_context_menu_enabled: bool,
     window_size_mode: &WindowSizeMode,
     start_path: &Option<PathBuf>,
     theme: Option<&str>,
@@ -533,7 +533,7 @@ pub fn save_app_settings(
         folder_scanning_enabled,
         show_hidden_files_folders,
         show_item_viewer_icons,
-        windows_context_menu_enabled,
+        legacy_windows_context_menu_enabled: false,
         window_size_mode: window_size_mode.clone(),
         start_path: start_path.clone(),
         theme: theme.map(|s| s.to_string()),
@@ -614,6 +614,8 @@ pub struct ContextMenuSettingsSnapshot {
     /// Display labels of hidden entries, so they can be listed (and shown
     /// again) even when they are not part of the current menu.
     pub labels: std::collections::BTreeMap<String, String>,
+    /// Keys of hidden entries of Eden's own item menu (`eden:<name>`).
+    pub eden_hidden: Vec<String>,
 }
 
 /// Loads the context menu preferences. Missing or unreadable files fall back
@@ -696,5 +698,103 @@ mod tests {
         // For now, we just verify the function exists and can be called
         let path = theme_cache_path();
         assert!(path.is_some() || path.is_none()); // Basic sanity check
+    }
+
+    /// `AppSettingsSnapshot` as written by builds that still had the
+    /// "Use Native Context Menu" setting (field list copied verbatim).
+    #[derive(Serialize)]
+    struct OldAppSettingsSnapshot {
+        folder_scanning_enabled: bool,
+        show_hidden_files_folders: bool,
+        show_item_viewer_icons: bool,
+        windows_context_menu_enabled: bool,
+        window_size_mode: WindowSizeMode,
+        start_path: Option<PathBuf>,
+        theme: Option<String>,
+        pinned_tabs: Vec<PathBuf>,
+        time_format_24h: bool,
+        date_style: DateStyle,
+        sort_column: crate::gui::utils::SortColumn,
+        sort_ascending: bool,
+        language: String,
+        item_viewer_file_column_order: Vec<ItemViewerHeaderColumn>,
+        item_viewer_drive_column_order: Vec<ItemViewerHeaderColumn>,
+        recycle_bin_column_order: Vec<ItemViewerHeaderColumn>,
+        item_viewer_file_column_sizes: Vec<f32>,
+        item_viewer_drive_column_sizes: Vec<f32>,
+        recycle_bin_column_sizes: Vec<f32>,
+        directory_settings: Vec<DirectorySettingsSnapshot>,
+    }
+
+    fn old_settings() -> OldAppSettingsSnapshot {
+        OldAppSettingsSnapshot {
+            folder_scanning_enabled: false,
+            show_hidden_files_folders: false,
+            show_item_viewer_icons: true,
+            windows_context_menu_enabled: true,
+            window_size_mode: WindowSizeMode::Custom {
+                width: 1000.0,
+                height: 700.0,
+            },
+            start_path: Some(PathBuf::from(r"C:\Users")),
+            theme: Some("dark".to_string()),
+            pinned_tabs: vec![PathBuf::from(r"C:\Temp")],
+            time_format_24h: true,
+            date_style: DateStyle::Iso,
+            sort_column: crate::gui::utils::SortColumn::Name,
+            sort_ascending: true,
+            language: "ja-JP".to_string(),
+            item_viewer_file_column_order: default_item_viewer_file_column_order(),
+            item_viewer_drive_column_order: default_item_viewer_drive_column_order(),
+            recycle_bin_column_order: default_recycle_bin_column_order(),
+            item_viewer_file_column_sizes: default_item_viewer_file_column_size(),
+            item_viewer_drive_column_sizes: default_item_viewer_drive_column_size(),
+            recycle_bin_column_sizes: default_recycle_bin_column_size(),
+            directory_settings: Vec::new(),
+        }
+    }
+
+    fn assert_old_settings_kept(snapshot: &AppSettingsSnapshot) {
+        assert!(!snapshot.folder_scanning_enabled);
+        assert!(!snapshot.show_hidden_files_folders);
+        assert!(snapshot.show_item_viewer_icons);
+        assert!(matches!(
+            snapshot.window_size_mode,
+            WindowSizeMode::Custom { width, height } if width == 1000.0 && height == 700.0
+        ));
+        assert_eq!(snapshot.start_path, Some(PathBuf::from(r"C:\Users")));
+        assert_eq!(snapshot.theme.as_deref(), Some("dark"));
+        assert_eq!(snapshot.pinned_tabs, vec![PathBuf::from(r"C:\Temp")]);
+        assert!(snapshot.time_format_24h);
+        assert_eq!(snapshot.language, "ja-JP");
+    }
+
+    #[test]
+    fn settings_with_retired_context_menu_flag_still_load() {
+        // settings.bin is postcard (bincode in old builds); both are
+        // positional, so the retired slot must still be consumed.
+        let bytes = postcard::to_allocvec(&old_settings()).unwrap();
+        let snapshot: AppSettingsSnapshot = postcard::from_bytes(&bytes).unwrap();
+        assert_old_settings_kept(&snapshot);
+
+        let bytes = bincode::serialize(&old_settings()).unwrap();
+        let snapshot: AppSettingsSnapshot = bincode::deserialize(&bytes).unwrap();
+        assert_old_settings_kept(&snapshot);
+
+        // Self-describing formats accept the field too.
+        let json = serde_json::to_string(&old_settings()).unwrap();
+        assert!(json.contains("\"windows_context_menu_enabled\":true"));
+        let snapshot: AppSettingsSnapshot = serde_json::from_str(&json).unwrap();
+        assert_old_settings_kept(&snapshot);
+    }
+
+    #[test]
+    fn context_menu_settings_without_eden_entries_load() {
+        let snapshot: ContextMenuSettingsSnapshot = serde_json::from_str(
+            r#"{ "hidden": ["verb:open"], "labels": { "verb:open": "Open" } }"#,
+        )
+        .unwrap();
+        assert_eq!(snapshot.hidden, vec!["verb:open".to_string()]);
+        assert!(snapshot.eden_hidden.is_empty());
     }
 }

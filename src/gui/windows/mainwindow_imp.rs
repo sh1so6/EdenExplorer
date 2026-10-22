@@ -408,9 +408,6 @@ impl MainWindow {
                 .current_settings
                 .show_hidden_files_folders,
             self.settings_window.current_settings.show_item_viewer_icons,
-            self.settings_window
-                .current_settings
-                .windows_context_menu_enabled,
             &self.settings_window.current_settings.window_size_mode,
             &self.settings_window.current_settings.start_path,
             Some(match self.theme {
@@ -1636,7 +1633,6 @@ impl MainWindow {
                         _folder_scanning_enabled,
                         _show_hidden_files_folders,
                         _show_item_viewer_icons,
-                        _windows_context_menu_enabled,
                         _window_size_mode,
                         start_path,
                         _saved_theme,
