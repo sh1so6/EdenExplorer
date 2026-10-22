@@ -16,6 +16,7 @@ pub fn draw_topbar(
     hwnd: Option<HWND>,
     palette: &crate::gui::theme::ThemePalette,
     has_split: bool,
+    vertical_tabs: bool,
 ) -> TopbarAction {
     let mut action = TopbarAction::default();
 
@@ -33,6 +34,7 @@ pub fn draw_topbar(
                 palette,
                 &mut action,
                 has_split,
+                vertical_tabs,
             );
             draw_drag_region(ui, hwnd);
         });
@@ -53,6 +55,7 @@ pub fn draw_topbar(
                     palette,
                     &mut action,
                     has_split,
+                    vertical_tabs,
                 );
             });
 
@@ -134,6 +137,7 @@ fn draw_mode_icons(
     palette: &crate::gui::theme::ThemePalette,
     action: &mut TopbarAction,
     has_split: bool,
+    vertical_tabs: bool,
 ) {
     let sidebar_tooltip_key = if sidebar_collapsed {
         "tooltip_show_sidebar"
@@ -232,6 +236,29 @@ fn draw_mode_icons(
             .clicked()
         {
             action.toggle_active_tab_split = true;
+        }
+
+        let vertical_tabs_tooltip_key = if vertical_tabs {
+            "tooltip_vertical_tabs_off"
+        } else {
+            "tooltip_vertical_tabs_on"
+        };
+        if clickable_active_icon(
+            ui,
+            regular::ROWS,
+            ui.visuals().text_color(),
+            vertical_tabs,
+            palette,
+        )
+        .on_hover_text(
+            egui::RichText::new(i18n.tr(vertical_tabs_tooltip_key))
+                .size(palette.tooltip_text_size)
+                .color(palette.tooltip_text_color),
+        )
+        .on_hover_cursor(egui::CursorIcon::PointingHand)
+        .clicked()
+        {
+            action.toggle_vertical_tabs = true;
         }
     }
 }

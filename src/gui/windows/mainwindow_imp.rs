@@ -2,8 +2,8 @@ use crate::core::drives::{get_drive_infos, is_raw_physical_drive_path};
 use crate::core::fs::{FileItem, get_shell_item_metadata};
 use crate::core::fs::{MY_RECYCLE_BIN_PATH, parallel_directory_scan, scan_dir_async};
 use crate::core::indexer::{
-    DirectorySettingsSnapshot, WindowSizeMode, load_app_settings, save_app_settings,
-    save_favorites, save_tags, save_theme_settings,
+    DirectorySettingsSnapshot, LayoutSettingsSnapshot, WindowSizeMode, load_app_settings,
+    save_app_settings, save_favorites, save_layout_settings, save_tags, save_theme_settings,
 };
 use crate::gui::MainWindow;
 use crate::gui::i18n::I18n;
@@ -442,6 +442,15 @@ impl MainWindow {
                 .recycle_bin_column_sizes,
             &self.settings_window.current_settings.directory_settings,
         );
+        self.save_layout_settings_to_disk();
+    }
+
+    /// Persists layout preferences (vertical tabs) to `layout.json`.
+    pub(crate) fn save_layout_settings_to_disk(&self) {
+        save_layout_settings(&LayoutSettingsSnapshot {
+            vertical_tabs: self.settings_window.current_settings.vertical_tabs,
+            vertical_tabs_width: self.settings_window.current_settings.vertical_tabs_width,
+        });
     }
 
     fn save_or_defer_column_settings_to_disk(&mut self, finished: bool) {
@@ -1842,6 +1851,13 @@ impl MainWindow {
             }
             if action.toggle_active_tab_split {
                 self.toggle_split_for_active_tab();
+            }
+            if action.toggle_vertical_tabs {
+                let settings = &mut self.settings_window.current_settings;
+                settings.vertical_tabs = !settings.vertical_tabs;
+                // Keep the active tab visible in whichever tab strip is now shown.
+                self.pending_tab_scroll_id = self.tabs.get(self.active_tab).map(|tab| tab.id);
+                self.save_layout_settings_to_disk();
             }
         }
     }

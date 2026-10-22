@@ -886,6 +886,7 @@ pub struct TopbarAction {
     pub toggle_file_explorer: bool,
     pub toggle_sidebar: bool,
     pub toggle_active_tab_split: bool,
+    pub toggle_vertical_tabs: bool,
 }
 
 #[derive(Default)]

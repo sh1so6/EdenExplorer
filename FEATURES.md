@@ -11,6 +11,7 @@
   <li><b>Streaming directory enumeration</b> for responsive browsing of large directories</li>
   <li><b>Intuitive navigation</b> with <b>Back / Forward / Up</b> controls and persistent navigation history</li>
   <li><b>Tabbed navigation</b> with independent loading states, tab pinning, and automatic tab restoration</li>
+  <li><b>Vertical tabs</b> option with a resizable tab panel (toggle from the topbar or Settings)</li>
   <li><b>Split-pane Explorer view</b> for browsing multiple locations side-by-side</li>
   <li><b>Collapsible sidebar</b> with quick access to common folders and customizable favorites</li>
   <li><b>Native Recycle Bin support</b> with dedicated Explorer integration</li>

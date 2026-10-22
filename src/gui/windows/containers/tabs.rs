@@ -16,6 +16,110 @@ const ADD_TAB_WIDTH: f32 = 28.0;
 const TAB_HEIGHT: f32 = 32.0;
 const TAB_NAV_BUTTON_WIDTH: f32 = 28.0;
 
+pub const VERTICAL_TABS_MIN_WIDTH: f32 = 120.0;
+pub const VERTICAL_TABS_MAX_WIDTH: f32 = 400.0;
+pub const VERTICAL_TABS_DEFAULT_WIDTH: f32 = 200.0;
+const VERTICAL_TAB_ROW_HEIGHT: f32 = 30.0;
+const VERTICAL_TABS_HEADER_HEIGHT: f32 = 28.0;
+const VERTICAL_TABS_PADDING: f32 = 4.0;
+
+/// Pointer/drag state shared by the horizontal and vertical tab strips to decide
+/// whether dragged files are hovering a tab and should be dropped into its folder.
+struct TabDropContext<'a> {
+    drag_active: bool,
+    hovered_target: Option<&'a PathBuf>,
+    pointer_pos: Option<egui::Pos2>,
+    pointer_released: bool,
+}
+
+impl<'a> TabDropContext<'a> {
+    fn new(ui: &egui::Ui, drag_active: bool, hovered_target: Option<&'a PathBuf>) -> Self {
+        let pointer_pos = ui.input(|i| i.pointer.interact_pos().or_else(|| i.pointer.hover_pos()));
+        let pointer_released =
+            ui.input(|i| i.pointer.any_released() && i.pointer.interact_pos().is_some());
+        Self {
+            drag_active,
+            hovered_target,
+            pointer_pos,
+            pointer_released,
+        }
+    }
+
+    /// Returns true when dragged files hover `tab` (drawn in `rect`). The active tab is
+    /// never a drop target because its folder is already the one being shown.
+    fn is_drop_hovered(&self, tab: &TabInfo, rect: egui::Rect, active_id: u64) -> bool {
+        if !self.drag_active || tab.id == active_id {
+            return false;
+        }
+        self.hovered_target
+            .map(|target| target == &tab.full_path)
+            .unwrap_or_else(|| {
+                self.pointer_pos
+                    .map(|pointer| rect.contains(pointer))
+                    .unwrap_or(false)
+            })
+    }
+}
+
+/// Glyph for the tab's leading icon, which doubles as the pin toggle (hover previews the
+/// state a click would switch to).
+fn tab_icon_glyph(is_pinned: bool, hovered: bool) -> &'static str {
+    match (is_pinned, hovered) {
+        (true, true) => regular::FOLDER_SIMPLE,
+        (true, false) => fill::PUSH_PIN,
+        (false, true) => regular::PUSH_PIN,
+        (false, false) => regular::FOLDER_SIMPLE,
+    }
+}
+
+fn tab_pin_tooltip(i18n: &I18n, is_pinned: bool) -> String {
+    if is_pinned {
+        i18n.tr("tooltip_tab_unpin")
+    } else {
+        i18n.tr("tooltip_tab_pin")
+    }
+}
+
+/// Tooltip for a tab: the full title when it is truncated, otherwise its location.
+fn tab_hover_tooltip_text(i18n: &I18n, tab: &TabInfo, truncated: bool) -> String {
+    if truncated {
+        return tab.title.clone();
+    }
+    let path = tab.full_path.to_string_lossy().to_string();
+    if path == MY_PC_PATH {
+        i18n.tr("thispc")
+    } else if path == MY_RECYCLE_BIN_PATH {
+        i18n.tr("recycle_bin")
+    } else {
+        path
+    }
+}
+
+/// Makes `rect` behave like a native title bar: drag moves the window, double-click
+/// toggles maximized state.
+pub fn handle_window_drag_area(
+    ui: &mut egui::Ui,
+    rect: egui::Rect,
+    id: egui::Id,
+    hwnd: Option<HWND>,
+) {
+    let resp = ui.interact(rect, id, egui::Sense::click_and_drag());
+
+    if resp.double_clicked() {
+        if let Some(hwnd) = hwnd {
+            toggle_window_fullscreen(hwnd);
+        }
+    }
+
+    if resp.drag_started() || resp.dragged() {
+        ui.ctx().send_viewport_cmd(egui::ViewportCommand::StartDrag);
+    }
+
+    if resp.hovered() {
+        ui.ctx().set_cursor_icon(egui::CursorIcon::Grab);
+    }
+}
+
 pub fn draw_tabs(
     ui: &mut egui::Ui,
     i18n: &I18n,
@@ -29,10 +133,7 @@ pub fn draw_tabs(
     drag_hover_target: Option<PathBuf>,
 ) -> TabsAction {
     let mut action: TabsAction = TabsAction::default();
-    let pointer_pos = ui.input(|i| i.pointer.interact_pos().or_else(|| i.pointer.hover_pos()));
-    let pointer_released =
-        ui.input(|i| i.pointer.any_released() && i.pointer.interact_pos().is_some());
-    let hovered_target_ref = drag_hover_target.as_ref();
+    let drop_ctx = TabDropContext::new(ui, drag_active, drag_hover_target.as_ref());
     let mut tab_drop_target: Option<PathBuf> = None;
     let windows_buttons_width = 45.0 * 3.0;
     let split_button_width = 32.0;
@@ -125,33 +226,23 @@ pub fn draw_tabs(
                                         resp.scroll_to_me(Some(egui::Align::Center));
                                     }
 
-                                    if drag_active && tab.id != active_id {
-                                        let hovered = hovered_target_ref
-                                            .map(|target| target == &tab.full_path)
-                                            .unwrap_or_else(|| {
-                                                pointer_pos
-                                                    .map(|pointer| rect.contains(pointer))
-                                                    .unwrap_or(false)
-                                            });
+                                    if drop_ctx.is_drop_hovered(tab, rect, active_id) {
+                                        let painter = ui
+                                            .ctx()
+                                            .layer_painter(egui::LayerId::new(
+                                                egui::Order::Background,
+                                                ui.id().with("tab_drop_bg").with(tab.id),
+                                            ))
+                                            .with_clip_rect(ui.clip_rect());
 
-                                        if hovered {
-                                            let painter = ui
-                                                .ctx()
-                                                .layer_painter(egui::LayerId::new(
-                                                    egui::Order::Background,
-                                                    ui.id().with("tab_drop_bg").with(tab.id),
-                                                ))
-                                                .with_clip_rect(ui.clip_rect());
+                                        painter.rect_filled(
+                                            rect,
+                                            egui::CornerRadius::same(palette.medium_radius),
+                                            palette.primary_hover,
+                                        );
 
-                                            painter.rect_filled(
-                                                rect,
-                                                egui::CornerRadius::same(palette.medium_radius),
-                                                palette.primary_hover,
-                                            );
-
-                                            if pointer_released {
-                                                tab_drop_target = Some(tab.full_path.clone());
-                                            }
+                                        if drop_ctx.pointer_released {
+                                            tab_drop_target = Some(tab.full_path.clone());
                                         }
                                     }
 
@@ -184,32 +275,290 @@ pub fn draw_tabs(
 
             if drag_width > 4.0 {
                 let drag_rect = ui.allocate_space(egui::vec2(drag_width, 32.0)).1;
-
-                let resp = ui.interact(
-                    drag_rect,
-                    ui.id().with("tabs_window_drag_area"),
-                    egui::Sense::click_and_drag(),
-                );
-
-                if resp.double_clicked() {
-                    if let Some(hwnd) = hwnd {
-                        toggle_window_fullscreen(hwnd);
-                    }
-                }
-
-                if resp.drag_started() || resp.dragged() {
-                    ui.ctx().send_viewport_cmd(egui::ViewportCommand::StartDrag);
-                }
-
-                if resp.hovered() {
-                    ui.ctx().set_cursor_icon(egui::CursorIcon::Grab);
-                }
+                let drag_id = ui.id().with("tabs_window_drag_area");
+                handle_window_drag_area(ui, drag_rect, drag_id, hwnd);
             }
         },
     );
     action.move_files_to_tab_dir = tab_drop_target;
     action.max_scroll_offset = max_scroll_offset;
     action
+}
+
+/// Draws the tab list as a vertical panel that fills `ui.max_rect()`.
+///
+/// Returns the same `TabsAction` as the horizontal strip (minus scrolling, which the
+/// panel's own `ScrollArea` handles) so both modes share `handle_tabs_action`.
+pub fn draw_vertical_tabs(
+    ui: &mut egui::Ui,
+    i18n: &I18n,
+    tabs: &[TabInfo],
+    active_id: u64,
+    palette: &ThemePalette,
+    scroll_to_id: Option<u64>,
+    drag_active: bool,
+    drag_hover_target: Option<PathBuf>,
+) -> TabsAction {
+    let mut action = TabsAction::default();
+    let drop_ctx = TabDropContext::new(ui, drag_active, drag_hover_target.as_ref());
+    let mut tab_drop_target: Option<PathBuf> = None;
+
+    let panel_rect = ui.max_rect();
+    ui.painter().rect_stroke(
+        panel_rect,
+        0.0,
+        egui::Stroke::new(1.0, palette.borders_default),
+        egui::StrokeKind::Inside,
+    );
+
+    let content_rect = panel_rect.shrink(VERTICAL_TABS_PADDING);
+    ui.scope_builder(
+        egui::UiBuilder::new()
+            .max_rect(content_rect)
+            .layout(egui::Layout::top_down(egui::Align::Min)),
+        |ui| {
+            handle_draw_vertical_new_tab_button(ui, i18n, palette, &mut action);
+            ui.add_space(VERTICAL_TABS_PADDING);
+
+            egui::ScrollArea::vertical()
+                .id_salt("vertical_tabs_scroll")
+                .auto_shrink([false, false])
+                .show(ui, |ui| {
+                    ui.spacing_mut().item_spacing.y = 2.0;
+                    for tab in tabs {
+                        let (rect, resp) = ui.allocate_exact_size(
+                            egui::vec2(ui.available_width(), VERTICAL_TAB_ROW_HEIGHT),
+                            egui::Sense::click(),
+                        );
+
+                        if Some(tab.id) == scroll_to_id {
+                            resp.scroll_to_me(Some(egui::Align::Center));
+                        }
+
+                        // Rows scrolled out of view must not catch the pointer.
+                        let visible_rect = rect.intersect(ui.clip_rect());
+                        let drop_hovered = drop_ctx.is_drop_hovered(tab, visible_rect, active_id);
+                        if drop_hovered && drop_ctx.pointer_released {
+                            tab_drop_target = Some(tab.full_path.clone());
+                        }
+
+                        handle_draw_vertical_tab_row(
+                            ui,
+                            i18n,
+                            tab,
+                            rect,
+                            resp,
+                            active_id,
+                            drop_hovered,
+                            palette,
+                            &mut action,
+                        );
+                    }
+                });
+        },
+    );
+
+    action.move_files_to_tab_dir = tab_drop_target;
+    action
+}
+
+fn handle_draw_vertical_new_tab_button(
+    ui: &mut egui::Ui,
+    i18n: &I18n,
+    palette: &ThemePalette,
+    action: &mut TabsAction,
+) {
+    let label = i18n.tr("vertical_tabs_new_tab");
+    let (rect, resp) = ui.allocate_exact_size(
+        egui::vec2(ui.available_width(), VERTICAL_TABS_HEADER_HEIGHT),
+        egui::Sense::click(),
+    );
+    resp.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, true, &label));
+
+    let rect = egui::Rect::from_min_max(rect.min.round(), rect.max.round());
+    let hovered = resp.hovered();
+    let rounding = egui::CornerRadius::same(palette.medium_radius);
+
+    let (fill, stroke, icon_color) = if hovered {
+        (
+            ui.visuals().widgets.hovered.bg_fill,
+            egui::Stroke::new(1.0, palette.borders_active),
+            palette.icon_colored_hover,
+        )
+    } else {
+        (
+            egui::Color32::TRANSPARENT,
+            egui::Stroke::new(1.0, palette.borders_default),
+            palette.icon_color,
+        )
+    };
+
+    let padding = 8.0;
+    let spacing = 6.0;
+    let font_id = FontId::new(palette.text_size, FontFamily::Proportional);
+    let icon_font_id = FontId::new(palette.tab_icon_size, FontFamily::Proportional);
+    let text_width = rect.width() - 2.0 * padding - palette.tab_icon_size - spacing;
+    let (display_label, _) =
+        truncate_item_text(ui, &label, text_width, &font_id, palette.text_normal);
+
+    let painter = ui.painter();
+    painter.rect_filled(rect, rounding, fill);
+    painter.rect_stroke(rect, rounding, stroke, egui::StrokeKind::Inside);
+    painter.text(
+        egui::pos2(rect.left() + padding, rect.center().y),
+        egui::Align2::LEFT_CENTER,
+        regular::PLUS,
+        icon_font_id,
+        icon_color,
+    );
+    painter.text(
+        egui::pos2(
+            rect.left() + padding + palette.tab_icon_size + spacing,
+            rect.center().y,
+        ),
+        egui::Align2::LEFT_CENTER,
+        display_label,
+        font_id,
+        palette.text_normal,
+    );
+
+    if hovered {
+        ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+    }
+
+    if resp.clicked() {
+        action.open_new = true;
+    }
+}
+
+fn handle_draw_vertical_tab_row(
+    ui: &mut egui::Ui,
+    i18n: &I18n,
+    tab: &TabInfo,
+    rect: egui::Rect,
+    resp: egui::Response,
+    active_id: u64,
+    drop_hovered: bool,
+    palette: &ThemePalette,
+    action: &mut TabsAction,
+) {
+    let is_active = tab.id == active_id;
+    let rect = egui::Rect::from_min_max(rect.min.round(), rect.max.round());
+    // Includes hovering the pin/close buttons, which sit on top of the row response.
+    let row_hovered = ui.rect_contains_pointer(rect);
+
+    let font_id = FontId::new(palette.text_size, FontFamily::Proportional);
+    let icon_font_id = FontId::new(palette.tab_icon_size, FontFamily::Proportional);
+    let label_color = if is_active {
+        palette.tab_text_selected
+    } else {
+        palette.text_normal
+    };
+    let icon_color = if tab.is_pinned {
+        palette.pinned_tab_color
+    } else {
+        label_color
+    };
+
+    let icon_size = palette.tab_icon_size;
+    let spacing = 6.0;
+    let padding = 8.0;
+    let close_button_width = 20.0;
+    let icon_rect = egui::Rect::from_min_size(
+        egui::pos2(rect.left() + padding, rect.center().y - icon_size * 0.5),
+        egui::vec2(icon_size, icon_size),
+    );
+
+    let icon_resp = ui
+        .interact(
+            icon_rect,
+            ui.id().with(("vertical_tab_pin", tab.id)),
+            egui::Sense::click(),
+        )
+        .on_hover_text(
+            egui::RichText::new(tab_pin_tooltip(i18n, tab.is_pinned))
+                .size(palette.tooltip_text_size)
+                .color(palette.tooltip_text_color),
+        );
+    let icon_glyph = tab_icon_glyph(tab.is_pinned, icon_resp.hovered());
+
+    let icon_glyph_width = ui
+        .painter()
+        .layout_no_wrap(icon_glyph.to_string(), icon_font_id.clone(), icon_color)
+        .size()
+        .x;
+    let icon_draw_width = icon_size.max(icon_glyph_width);
+    let text_pos = egui::pos2(
+        rect.left() + padding + icon_draw_width + spacing,
+        rect.center().y,
+    );
+    // Space for the close button is always reserved so titles don't reflow on hover.
+    let text_width = rect.width() - icon_draw_width - spacing - 2.0 * padding - close_button_width;
+    let (display_title, truncated) =
+        truncate_item_text(ui, &tab.title, text_width, &font_id, label_color);
+
+    let fill = if drop_hovered {
+        palette.primary_hover
+    } else if is_active {
+        ui.visuals().widgets.active.bg_fill
+    } else if row_hovered {
+        ui.visuals().widgets.hovered.bg_fill
+    } else {
+        egui::Color32::TRANSPARENT
+    };
+    let rounding = egui::CornerRadius::same(palette.medium_radius);
+
+    let painter = ui.painter();
+    painter.rect_filled(rect, rounding, fill);
+    if is_active {
+        painter.rect_stroke(
+            rect,
+            rounding,
+            egui::Stroke::new(1.0, palette.borders_active),
+            egui::StrokeKind::Inside,
+        );
+    }
+    painter.text(
+        icon_rect.left_center(),
+        egui::Align2::LEFT_CENTER,
+        icon_glyph,
+        icon_font_id,
+        icon_color,
+    );
+    painter.text(
+        text_pos,
+        egui::Align2::LEFT_CENTER,
+        display_title,
+        font_id,
+        label_color,
+    );
+
+    let close_clicked = if is_active || row_hovered {
+        tab_close_button(ui, rect, tab.id, is_active, palette).clicked()
+    } else {
+        false
+    };
+
+    if close_clicked || resp.middle_clicked() {
+        action.close = Some(tab.id);
+    } else if icon_resp.clicked() {
+        action.toggle_pin = Some(tab.full_path.clone());
+    } else if resp.clicked() {
+        action.activate = Some(tab.id);
+    }
+
+    if icon_resp.hovered() {
+        ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+    }
+
+    if resp.hovered() {
+        ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+        resp.on_hover_text(
+            egui::RichText::new(tab_hover_tooltip_text(i18n, tab, truncated))
+                .size(palette.tooltip_text_size)
+                .color(palette.tooltip_text_color),
+        );
+    }
 }
 
 fn handle_draw_tab_new_allocated(
@@ -262,25 +611,11 @@ fn handle_draw_tab_new_allocated(
         egui::Sense::click(),
     );
     let icon_resp = icon_resp.on_hover_text(
-        egui::RichText::new(if tab.is_pinned {
-            i18n.tr("tooltip_tab_unpin")
-        } else {
-            i18n.tr("tooltip_tab_pin")
-        })
-        .size(palette.tooltip_text_size)
-        .color(palette.tooltip_text_color),
+        egui::RichText::new(tab_pin_tooltip(i18n, tab.is_pinned))
+            .size(palette.tooltip_text_size)
+            .color(palette.tooltip_text_color),
     );
-    let icon_glyph = if tab.is_pinned {
-        if icon_resp.hovered() {
-            regular::FOLDER_SIMPLE
-        } else {
-            fill::PUSH_PIN
-        }
-    } else if icon_resp.hovered() {
-        regular::PUSH_PIN
-    } else {
-        regular::FOLDER_SIMPLE
-    };
+    let icon_glyph = tab_icon_glyph(tab.is_pinned, icon_resp.hovered());
 
     let icon_glyph_width = ui
         .painter()
@@ -360,17 +695,7 @@ fn handle_draw_tab_new_allocated(
     if resp.hovered() {
         ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
 
-        let tooltip_text = if truncated {
-            tab.title.clone()
-        } else {
-            if tab.full_path.to_string_lossy().to_string() == MY_PC_PATH {
-                i18n.tr("thispc")
-            } else if tab.full_path.to_string_lossy().to_string() == MY_RECYCLE_BIN_PATH {
-                i18n.tr("recycle_bin")
-            } else {
-                tab.full_path.to_string_lossy().to_string()
-            }
-        };
+        let tooltip_text = tab_hover_tooltip_text(i18n, tab, truncated);
 
         resp.on_hover_text(
             egui::RichText::new(tooltip_text)

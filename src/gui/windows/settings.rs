@@ -290,6 +290,8 @@ impl Default for AppSettings {
             item_viewer_drive_column_sizes: default_item_viewer_drive_column_size(),
             recycle_bin_column_sizes: default_recycle_bin_column_size(),
             directory_settings: vec![],
+            vertical_tabs: false,
+            vertical_tabs_width: crate::gui::windows::containers::tabs::VERTICAL_TABS_DEFAULT_WIDTH,
         }
     }
 }
@@ -543,6 +545,19 @@ fn draw_general_tab(
                 "settings_show_item_viewer_file_icons",
             ) {
                 // Auto-save when setting changes
+                action = Some(SettingsAction::ApplySettings);
+            }
+        });
+        ui.add_space(8.0);
+        // Vertical Tabs
+        ui.horizontal(|ui| {
+            if setting_checkbox(
+                ui,
+                palette,
+                &mut settings.current_settings.vertical_tabs,
+                RichText::new(&i18n.tr("settings_vertical_tabs")).color(palette.text_normal),
+                "settings_vertical_tabs",
+            ) {
                 action = Some(SettingsAction::ApplySettings);
             }
         });

@@ -59,6 +59,9 @@ pub struct AppSettings {
     pub item_viewer_drive_column_sizes: Vec<f32>,
     pub recycle_bin_column_sizes: Vec<f32>,
     pub directory_settings: Vec<DirectorySettingsSnapshot>,
+    /// Persisted separately in `layout.json` (not part of the postcard settings snapshot).
+    pub vertical_tabs: bool,
+    pub vertical_tabs_width: f32,
 }
 
 #[derive(Default)]

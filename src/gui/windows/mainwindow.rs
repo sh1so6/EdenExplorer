@@ -1,4 +1,6 @@
-use crate::core::indexer::{load_app_settings, load_favorites, load_tags, load_theme_settings};
+use crate::core::indexer::{
+    load_app_settings, load_favorites, load_layout_settings, load_tags, load_theme_settings,
+};
 use crate::core::launch::take_forwarded_paths;
 use crate::core::utils::tabs::update_tab_infos_cache;
 use crate::gui::dragdrop::{DragDropBackend, DropTargets};
@@ -16,7 +18,10 @@ use crate::gui::windows::containers::structs::{
     ItemViewerNavBarAction, RenameState, SidebarAction, SplitSide, TabInfo, TabState, TabsAction,
     TagsState,
 };
-use crate::gui::windows::containers::tabs::draw_tabs;
+use crate::gui::windows::containers::tabs::{
+    VERTICAL_TABS_MAX_WIDTH, VERTICAL_TABS_MIN_WIDTH, draw_tabs, draw_vertical_tabs,
+    handle_window_drag_area,
+};
 use crate::gui::windows::containers::tags::{
     draw_delete_confirmation_popup, draw_tag_picker_popup, draw_tags,
 };
@@ -119,6 +124,7 @@ impl Default for MainWindow {
             recycle_bin_column_sizes,
             directory_settings,
         ) = load_app_settings();
+        let layout_settings = load_layout_settings();
         let loaded_settings = AppSettings {
             folder_scanning_enabled,
             show_hidden_files_folders,
@@ -139,6 +145,8 @@ impl Default for MainWindow {
             item_viewer_drive_column_sizes,
             recycle_bin_column_sizes,
             directory_settings,
+            vertical_tabs: layout_settings.vertical_tabs,
+            vertical_tabs_width: layout_settings.vertical_tabs_width,
         };
 
         let system_locale = sys_locale::get_locale().unwrap_or_else(|| "en-US".to_string());
@@ -441,6 +449,8 @@ impl eframe::App for MainWindow {
         let mut secondary_pending_action: Option<ItemViewerAction> = None;
         let mut tags_changed = false;
         let has_split = self.tabs[self.active_tab].split_view.is_some();
+        let vertical_tabs = self.settings_window.current_settings.vertical_tabs;
+        let mut save_layout_settings = false;
 
         let offset = egui::vec2(8.0, 8.0);
 
@@ -493,6 +503,7 @@ impl eframe::App for MainWindow {
                                         self.hwnd,
                                         &palette,
                                         has_split,
+                                        vertical_tabs,
                                     ));
                                 });
                                 if !self.sidebar_collapsed {
@@ -576,40 +587,62 @@ impl eframe::App for MainWindow {
                                         // Tabs
                                         // -------------------------
 
-                                        let tabs_rect = egui::Rect::from_min_size(
-                                            topbar_rect.min + egui::vec2(0.0, 4.0),
-                                            egui::vec2(topbar_rect.width(), 24.0),
-                                        );
+                                        let controls_width = 45.0 * 3.0;
 
-                                        let scroll_to_id = self.pending_tab_scroll_id;
-
-                                        ui.scope_builder(
-                                            egui::UiBuilder::new().max_rect(tabs_rect),
-                                            |ui| {
-                                                tabs_action = Some(draw_tabs(
+                                        if vertical_tabs {
+                                            // Tabs live in the side panel below; the strip is
+                                            // only a title-bar drag area next to the controls.
+                                            let controls_left =
+                                                ui.ctx().viewport_rect().right() - controls_width;
+                                            let drag_rect = egui::Rect::from_min_max(
+                                                topbar_rect.min,
+                                                egui::pos2(
+                                                    controls_left.min(topbar_rect.right()),
+                                                    topbar_rect.bottom(),
+                                                ),
+                                            );
+                                            if drag_rect.width() > 4.0 {
+                                                handle_window_drag_area(
                                                     ui,
-                                                    &self.i18n,
-                                                    &self.tab_infos_cache,
-                                                    self.tab_scroll_offset,
-                                                    active_id,
-                                                    &palette,
+                                                    drag_rect,
+                                                    ui.id().with("vertical_tabs_window_drag_area"),
                                                     self.hwnd,
-                                                    scroll_to_id,
-                                                    drag_active,
-                                                    drag_hover_target.clone(),
-                                                ));
-                                            },
-                                        );
+                                                );
+                                            }
+                                        } else {
+                                            let tabs_rect = egui::Rect::from_min_size(
+                                                topbar_rect.min + egui::vec2(0.0, 4.0),
+                                                egui::vec2(topbar_rect.width(), 24.0),
+                                            );
 
-                                        if scroll_to_id.is_some() {
-                                            self.pending_tab_scroll_id = None;
+                                            let scroll_to_id = self.pending_tab_scroll_id;
+
+                                            ui.scope_builder(
+                                                egui::UiBuilder::new().max_rect(tabs_rect),
+                                                |ui| {
+                                                    tabs_action = Some(draw_tabs(
+                                                        ui,
+                                                        &self.i18n,
+                                                        &self.tab_infos_cache,
+                                                        self.tab_scroll_offset,
+                                                        active_id,
+                                                        &palette,
+                                                        self.hwnd,
+                                                        scroll_to_id,
+                                                        drag_active,
+                                                        drag_hover_target.clone(),
+                                                    ));
+                                                },
+                                            );
+
+                                            if scroll_to_id.is_some() {
+                                                self.pending_tab_scroll_id = None;
+                                            }
                                         }
 
                                         // -------------------------
                                         // Window controls
                                         // -------------------------
-
-                                        let controls_width = 45.0 * 3.0;
 
                                         let viewport_rect = ui.ctx().viewport_rect();
 
@@ -643,7 +676,92 @@ impl eframe::App for MainWindow {
                                             bottom: 0,
                                         });
 
-                                    container.show(ui, |ui| {
+                                    // -------------------------
+                                    // Vertical tabs panel + resize separator
+                                    // -------------------------
+                                    let mut content_rect: Option<egui::Rect> = None;
+                                    if vertical_tabs {
+                                        const PANEL_GAP: f32 = 4.0;
+                                        const CONTENT_MIN_WIDTH: f32 = 200.0;
+                                        let area = ui.available_rect_before_wrap();
+                                        let max_width = (area.width() - PANEL_GAP - CONTENT_MIN_WIDTH)
+                                            .min(VERTICAL_TABS_MAX_WIDTH)
+                                            .max(VERTICAL_TABS_MIN_WIDTH);
+                                        let panel_width = self
+                                            .settings_window
+                                            .current_settings
+                                            .vertical_tabs_width
+                                            .clamp(VERTICAL_TABS_MIN_WIDTH, max_width);
+                                        let panel_rect = egui::Rect::from_min_size(
+                                            area.min,
+                                            egui::vec2(panel_width, area.height()),
+                                        );
+
+                                        let scroll_to_id = self.pending_tab_scroll_id;
+                                        ui.scope_builder(
+                                            egui::UiBuilder::new().max_rect(panel_rect),
+                                            |ui| {
+                                                tabs_action = Some(draw_vertical_tabs(
+                                                    ui,
+                                                    &self.i18n,
+                                                    &self.tab_infos_cache,
+                                                    active_id,
+                                                    &palette,
+                                                    scroll_to_id,
+                                                    drag_active,
+                                                    drag_hover_target.clone(),
+                                                ));
+                                            },
+                                        );
+                                        if scroll_to_id.is_some() {
+                                            self.pending_tab_scroll_id = None;
+                                        }
+
+                                        let separator_x = panel_rect.right() + PANEL_GAP / 2.0;
+                                        let separator_rect = egui::Rect::from_center_size(
+                                            egui::pos2(separator_x, panel_rect.center().y),
+                                            egui::vec2(6.0, panel_rect.height()),
+                                        );
+                                        let separator_response = ui.interact(
+                                            separator_rect,
+                                            ui.id().with("vertical_tabs_separator"),
+                                            egui::Sense::click_and_drag(),
+                                        );
+
+                                        if separator_response.hovered() || separator_response.dragged() {
+                                            ui.ctx().set_cursor_icon(egui::CursorIcon::ResizeHorizontal);
+
+                                            let handle_height = 25.0;
+                                            let handle_width = 6.0;
+                                            let handle_rect = egui::Rect::from_center_size(
+                                                egui::pos2(separator_x, panel_rect.center().y),
+                                                egui::vec2(handle_width, handle_height),
+                                            );
+
+                                            ui.painter().rect_filled(
+                                                handle_rect,
+                                                handle_width / 2.0,
+                                                palette.button_seperator_handle_fill,
+                                            );
+                                        }
+
+                                        if separator_response.dragged() {
+                                            self.settings_window.current_settings.vertical_tabs_width =
+                                                (panel_width + separator_response.drag_delta().x)
+                                                    .clamp(VERTICAL_TABS_MIN_WIDTH, max_width);
+                                        }
+
+                                        if separator_response.drag_stopped() {
+                                            save_layout_settings = true;
+                                        }
+
+                                        content_rect = Some(egui::Rect::from_min_max(
+                                            egui::pos2(panel_rect.right() + PANEL_GAP, area.top()),
+                                            area.max,
+                                        ));
+                                    }
+
+                                    let draw_content = |ui: &mut egui::Ui| {
                                         if has_split {
                                             let split_rect = ui.available_rect_before_wrap();
                                             let (split_rect, _) = ui.allocate_exact_size(
@@ -937,7 +1055,18 @@ impl eframe::App for MainWindow {
                                                 snapshot,
                                             );
                                         }
-                                    });
+                                    };
+
+                                    if let Some(content_rect) = content_rect {
+                                        ui.scope_builder(
+                                            egui::UiBuilder::new().max_rect(content_rect),
+                                            |ui| {
+                                                container.show(ui, draw_content);
+                                            },
+                                        );
+                                    } else {
+                                        container.show(ui, draw_content);
+                                    }
                                 },
                             );
                         } else if draw_tags(
@@ -1153,6 +1282,9 @@ impl eframe::App for MainWindow {
         self.handle_file_op_progress(ui.ctx());
         self.handle_directory_size_updates(ui.ctx());
         self.handle_throttle_size_requests(ui.ctx());
+        if save_layout_settings {
+            self.save_layout_settings_to_disk();
+        }
         self.handle_topbar_action(topbar_action);
         self.handle_sidebar_action(sidebar_action, sidebar_drag_sources.as_deref());
         self.handle_tabs_action(tabs_action, tabs_drag_sources.as_deref());

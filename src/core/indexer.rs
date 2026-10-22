@@ -3,6 +3,9 @@ use crate::gui::theme::{THEME_VERSION, ThemePalette, get_default_palette};
 use crate::gui::utils::SortKey;
 use crate::gui::windows::containers::enums::ItemViewerHeaderColumn;
 use crate::gui::windows::containers::structs::{GalleryThumbnailSize, ItemViewerDisplayMode};
+use crate::gui::windows::containers::tabs::{
+    VERTICAL_TABS_DEFAULT_WIDTH, VERTICAL_TABS_MAX_WIDTH, VERTICAL_TABS_MIN_WIDTH,
+};
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
@@ -309,6 +312,11 @@ fn theme_cache_path() -> Option<PathBuf> {
     Some(base.join("ExplorerEden").join("theme.bin"))
 }
 
+fn layout_settings_path() -> Option<PathBuf> {
+    let base = dirs::data_local_dir()?;
+    Some(base.join("ExplorerEden").join("layout.json"))
+}
+
 fn tags_cache_path() -> Option<PathBuf> {
     let base = dirs::data_local_dir()?;
     Some(base.join("ExplorerEden").join("tags.bin"))
@@ -535,6 +543,53 @@ pub fn save_app_settings(
         directory_settings: directory_settings.to_vec(),
     };
     if let Ok(data) = postcard::to_allocvec(&snapshot) {
+        let _ = std::fs::write(path, data);
+    }
+}
+
+/// Layout preferences stored separately from `settings.bin` as self-describing JSON,
+/// so new fields can be added without invalidating the postcard settings file.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(default)]
+pub struct LayoutSettingsSnapshot {
+    pub vertical_tabs: bool,
+    pub vertical_tabs_width: f32,
+}
+
+impl Default for LayoutSettingsSnapshot {
+    fn default() -> Self {
+        Self {
+            vertical_tabs: false,
+            vertical_tabs_width: VERTICAL_TABS_DEFAULT_WIDTH,
+        }
+    }
+}
+
+/// Loads layout preferences. Missing or unreadable files fall back to defaults.
+pub fn load_layout_settings() -> LayoutSettingsSnapshot {
+    let mut snapshot = layout_settings_path()
+        .and_then(|path| std::fs::read_to_string(path).ok())
+        .and_then(|data| serde_json::from_str::<LayoutSettingsSnapshot>(&data).ok())
+        .unwrap_or_default();
+
+    snapshot.vertical_tabs_width = if snapshot.vertical_tabs_width.is_finite() {
+        snapshot
+            .vertical_tabs_width
+            .clamp(VERTICAL_TABS_MIN_WIDTH, VERTICAL_TABS_MAX_WIDTH)
+    } else {
+        VERTICAL_TABS_DEFAULT_WIDTH
+    };
+
+    snapshot
+}
+
+pub fn save_layout_settings(snapshot: &LayoutSettingsSnapshot) {
+    let path = match layout_settings_path() {
+        Some(path) => path,
+        None => return,
+    };
+    let _ = std::fs::create_dir_all(path.parent().unwrap());
+    if let Ok(data) = serde_json::to_string_pretty(snapshot) {
         let _ = std::fs::write(path, data);
     }
 }
