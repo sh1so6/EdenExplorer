@@ -160,7 +160,7 @@
 - [x] **File/Directory filtering** - typing characters automatically start filtering items in the item viewer
 - [x] **Windows environment variables PATH support** - Automatically expands Windows PATHs in breadcrumb input
 - [x] Drag and drop files into breadcrumb folders and directory tabs
-- [x] Enable/Disable Windows shell integration. By enabling, the context menu will populate with default Windows registry context menu items
+- [x] Native Windows context menu on items, with EdenExplorer's own commands in an "EdenExplorer" submenu; entries can be hidden in Settings, and Shift+right-click shows the full, unfiltered menu
 - [x] New context menu command (Copy Path) with keyboard shortcut of Ctrl+Shift+C
 - [x] Column sorting saves across sessions
 - [x] Drag and drop files from EdenExplorer into native Operating System (Windows) objects (Desktop, File Explorer, applications, etc.)

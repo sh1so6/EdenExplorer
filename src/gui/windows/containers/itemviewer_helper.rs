@@ -16,20 +16,22 @@ use crate::gui::windows::containers::enums::{
 use crate::gui::windows::containers::structs::{
     DragState, ExplorerState, FilterState, ItemViewerColumnFitRequest, ItemViewerColumnLayout,
     ItemViewerColumnState, ItemViewerColumnWidths, ItemViewerFolderSizeState, ItemViewerLayout,
-    ItemViewerNavBarAction, RenameState,
+    ItemViewerNavBarAction, PendingItemMenu, RenameState, TabView,
 };
 use crate::gui::windows::eden_menu_entries::{self, EdenMenuEntry, EdenMenuSlot};
 use crate::gui::windows::shell_context_menu::{
-    self, MENU_ICON_SIZE, MenuIcon, ShellContextMenu, ShellMenuNode,
+    self, AppMenuItem, AppSubmenu, NativeMenuChoice, ShellContextMenu,
 };
 use crate::gui::windows::structs::{SettingsWindow, ThemeCustomizer};
 use eframe::egui;
 use egui::containers::{Popup, PopupCloseBehavior};
-use egui::{AtomExt as _, FontFamily, FontId};
+use egui::{FontFamily, FontId};
 use egui_phosphor::regular;
 use std::collections::HashMap;
-use std::path::PathBuf;
-use windows::Win32::Foundation::HWND;
+use std::path::{Path, PathBuf};
+use std::time::{Duration, Instant};
+use windows::Win32::Foundation::{HWND, POINT};
+use windows::Win32::UI::WindowsAndMessaging::GetCursorPos;
 
 const ITEM_VIEWER_COLUMN_RESIZE_ACTIVE_ID: &str = "item_viewer_column_resize_active";
 
@@ -110,14 +112,25 @@ fn context_menu_paths(
     paths
 }
 
+/// Label of the submenu that holds Eden's entries at the top of the native
+/// item menu: the app's name, so it is not translated.
+const EDEN_SUBMENU_LABEL: &str = "EdenExplorer";
+
+/// A requested item menu that has not opened this many frames after it was
+/// due (its view was not drawn meanwhile) is dropped, as is one older than
+/// [`PENDING_ITEM_MENU_TIMEOUT`].
+const PENDING_ITEM_MENU_MAX_LATE_FRAMES: u64 = 10;
+const PENDING_ITEM_MENU_TIMEOUT: Duration = Duration::from_secs(2);
+
 /// The right-click menu of an item (list row, gallery tile). Call it on every
 /// frame the menu may be open.
 ///
-/// A Shift+right-click shows the complete Windows menu (with the extended
-/// verbs, nothing hidden) natively instead, like Explorer, and the egui menu
-/// is not opened at all. Only the click itself is checked: pressing Shift
-/// while the egui menu is open keeps that menu. Drives and Recycle Bin items
-/// have no shell menu and always get the egui menu.
+/// Files and folders get the native Windows menu with Eden's entries in an
+/// "EdenExplorer" submenu at the top; Shift+right-click shows the complete
+/// menu (extended verbs, nothing hidden), like Explorer. The click only
+/// selects the item and requests the menu; [`open_pending_item_menu`] opens
+/// it once the new selection has been painted. Drives and Recycle Bin items
+/// have no shell menu and get an egui menu.
 #[allow(clippy::too_many_arguments)]
 pub fn show_item_context_menu(
     response: &egui::Response,
@@ -133,20 +146,18 @@ pub fn show_item_context_menu(
     explorer_state: &mut ExplorerState,
     hwnd: Option<HWND>,
 ) {
-    if let Some(hwnd) = hwnd
-        && !is_drive_view
-        && !is_recycle_bin_view
-        && response.secondary_clicked()
-        && response.ctx.input(|i| i.modifiers.shift)
-    {
-        // Same selection update as the egui menu.
-        if !is_selected {
-            *action = Some(ItemViewerAction::ReplaceSelection(file.path.clone()));
+    if hwnd.is_some() && !is_drive_view && !is_recycle_bin_view {
+        if response.secondary_clicked() {
+            request_native_item_menu(
+                response,
+                file,
+                is_selected,
+                paste_enabled,
+                is_cut,
+                action,
+                explorer_state,
+            );
         }
-        // The native menu replaces any egui menu that is still open.
-        Popup::close_all(&response.ctx);
-        let paths = context_menu_paths(file, is_selected, explorer_state);
-        show_standard_shell_menu(&paths, hwnd);
         return;
     }
 
@@ -168,26 +179,220 @@ pub fn show_item_context_menu(
                         action,
                         palette,
                         explorer_state,
-                        hwnd,
                     );
                 });
         });
 }
 
-/// Builds a fresh standard (Shift+right-click) shell menu for `paths` and
-/// shows it natively; blocks until the menu is closed. The menu lives only
-/// for this one showing and is kept apart from the cached egui-mode menu.
-fn show_standard_shell_menu(paths: &[PathBuf], hwnd: HWND) {
-    match ShellContextMenu::standard_for_paths(paths, hwnd) {
-        Ok(menu) => {
-            if let Err(err) = menu.show_native(hwnd) {
-                eprintln!("Windows native menu failed: {}", err);
+/// Selects the right-clicked item and requests its native menu.
+fn request_native_item_menu(
+    response: &egui::Response,
+    file: &FileItem,
+    is_selected: bool,
+    paste_enabled: bool,
+    is_cut: bool,
+    action: &mut Option<ItemViewerAction>,
+    explorer_state: &mut ExplorerState,
+) {
+    let ctx = &response.ctx;
+    // Like Explorer, a right-click selects an unselected item.
+    if !is_selected {
+        *action = Some(ItemViewerAction::ReplaceSelection(file.path.clone()));
+    }
+    // The native menu replaces any egui menu that is still open.
+    Popup::close_all(ctx);
+    let frame = ctx.cumulative_frame_nr();
+    explorer_state.pending_item_menu = Some(PendingItemMenu {
+        file: file.path.clone(),
+        file_is_dir: file.is_dir,
+        paths: context_menu_paths(file, is_selected, explorer_state),
+        extended: ctx.input(|i| i.modifiers.shift),
+        paste_enabled,
+        is_cut,
+        screen_pos: cursor_screen_pos(),
+        // A selection change is applied after this frame and painted by the
+        // next one, which is presented before the frame after it starts. The
+        // menu blocks the UI thread, so it opens on that later frame to show
+        // over the new selection.
+        open_at_frame: frame + if is_selected { 1 } else { 2 },
+        requested_at: Instant::now(),
+    });
+    ctx.request_repaint();
+}
+
+fn cursor_screen_pos() -> Option<(i32, i32)> {
+    let mut point = POINT::default();
+    unsafe { GetCursorPos(&mut point) }.ok()?;
+    Some((point.x, point.y))
+}
+
+/// Opens the native item menu requested by [`show_item_context_menu`] once it
+/// is due, and returns the action picked in it. Call it once per frame for
+/// each view, before the view's items are drawn. A request is consumed
+/// exactly once; it is dropped when it went stale (the view changed or was
+/// not drawn for a while).
+pub fn open_pending_item_menu(
+    ctx: &egui::Context,
+    i18n: &I18n,
+    view: &mut TabView,
+    hwnd: Option<HWND>,
+    modal_input_blocked: bool,
+) -> Option<ItemViewerAction> {
+    let request = view.explorer_state.pending_item_menu.as_ref()?;
+    let frame = ctx.cumulative_frame_nr();
+    if frame < request.open_at_frame {
+        ctx.request_repaint();
+        return None;
+    }
+    let request = view.explorer_state.pending_item_menu.take()?;
+    let stale = frame > request.open_at_frame + PENDING_ITEM_MENU_MAX_LATE_FRAMES
+        || request.requested_at.elapsed() > PENDING_ITEM_MENU_TIMEOUT
+        || modal_input_blocked
+        || view.nav.is_root()
+        || view.nav.is_recycle_bin()
+        || !view.files.iter().any(|item| item.path == request.file);
+    if stale {
+        shell_context_menu::debug_log(format_args!(
+            "item menu request for '{}' dropped (stale)",
+            request.file.display()
+        ));
+        return None;
+    }
+    show_native_item_menu(i18n, &request, hwnd?)
+}
+
+/// Builds and shows the native item menu (blocks until it is closed).
+fn show_native_item_menu(
+    i18n: &I18n,
+    request: &PendingItemMenu,
+    hwnd: HWND,
+) -> Option<ItemViewerAction> {
+    let started = Instant::now();
+    let slots = if request.extended {
+        eden_menu_entries::all_slots()
+    } else {
+        eden_menu_entries::visible_slots()
+    };
+    let items: Vec<AppMenuItem> = slots
+        .iter()
+        .map(|slot| match slot {
+            EdenMenuSlot::Separator => AppMenuItem::Separator,
+            EdenMenuSlot::Entry(entry) => {
+                let (enabled, label) = eden_entry_state(
+                    i18n,
+                    *entry,
+                    &request.paths,
+                    request.is_cut,
+                    request.paste_enabled,
+                );
+                AppMenuItem::Command { label, enabled }
             }
+        })
+        .collect();
+    let eden_action = |index: usize| match slots.get(index) {
+        Some(EdenMenuSlot::Entry(entry)) => eden_entry_action(*entry, &request.file, &request.paths),
+        _ => None,
+    };
+
+    let menu = if request.extended {
+        ShellContextMenu::standard_for_paths(&request.paths, hwnd)
+    } else {
+        ShellContextMenu::for_paths(&request.paths, hwnd)
+    };
+    shell_context_menu::debug_log(format_args!(
+        "item menu: build started {:.1} ms after the click, took {:.2} ms",
+        (started - request.requested_at).as_secs_f64() * 1000.0,
+        started.elapsed().as_secs_f64() * 1000.0,
+    ));
+    let menu = match menu {
+        Ok(menu) => menu,
+        Err(err) => {
+            // Eden's entries still work without the shell's.
+            eprintln!("Windows menu load failed: {}", err);
+            return match shell_context_menu::show_app_menu(hwnd, request.screen_pos, &items) {
+                Ok(index) => index.and_then(eden_action),
+                Err(err) => {
+                    eprintln!("EdenExplorer menu failed: {}", err);
+                    None
+                }
+            };
         }
-        Err(err) => eprintln!("Windows menu load failed: {}", err),
+    };
+
+    let app = AppSubmenu {
+        label: EDEN_SUBMENU_LABEL,
+        items: &items,
+    };
+    let choice = match menu.show_native(hwnd, request.screen_pos, Some(app)) {
+        Ok(choice) => choice,
+        Err(err) => {
+            eprintln!("Windows native menu failed: {}", err);
+            return None;
+        }
+    };
+    match choice {
+        NativeMenuChoice::Cancelled => None,
+        NativeMenuChoice::App(index) => eden_action(index),
+        NativeMenuChoice::Shell(command) => {
+            let verb = command.verb().unwrap_or_default();
+            if let Some(action) =
+                shell_verb_action(verb, &request.file, request.file_is_dir, &request.paths)
+            {
+                shell_context_menu::debug_log(format_args!(
+                    "shell verb '{verb}' handled by EdenExplorer"
+                ));
+                return Some(action);
+            }
+            if let Err(err) = menu.invoke(hwnd, &command, request.screen_pos) {
+                eprintln!("Windows menu invoke failed: {}", err);
+            }
+            None
+        }
     }
 }
 
+/// Eden's own action for a shell verb picked in the native item menu, for
+/// the verbs the shell cannot run properly outside Explorer's own view or
+/// that Eden must handle itself to stay consistent:
+///
+/// - `rename`: the shell's rename is the in-place edit of Explorer's view;
+///   Eden starts its own inline rename instead.
+/// - `delete`: Eden's delete (progress window, tags of deleted items
+///   removed, folder reloaded; Eden has no folder watcher).
+/// - `cut`, `copy`: Eden's clipboard handling (plain `CF_HDROP` that outlives
+///   the menu, cut items dimmed right away, selection as with Ctrl+X).
+/// - `open`/`explore` and `opennewtab` on a single folder: navigate in Eden
+///   (or open an Eden tab) instead of opening an Explorer window.
+///
+/// Everything else, `paste` (which pastes *into* the right-clicked folder,
+/// unlike Eden's paste into the current folder) and `properties` included,
+/// is run by the shell.
+fn shell_verb_action(
+    verb: &str,
+    file: &Path,
+    file_is_dir: bool,
+    paths: &[PathBuf],
+) -> Option<ItemViewerAction> {
+    let single_folder = file_is_dir && paths.len() == 1 && paths[0] == file;
+    match verb.to_ascii_lowercase().as_str() {
+        "rename" => Some(ItemViewerAction::StartEdit(file.to_path_buf())),
+        "delete" => Some(ItemViewerAction::Context(ItemViewerContextAction::Delete(
+            paths.to_vec(),
+        ))),
+        "cut" => Some(ItemViewerAction::Context(ItemViewerContextAction::Cut(
+            paths.to_vec(),
+        ))),
+        "copy" => Some(ItemViewerAction::Context(ItemViewerContextAction::Copy(
+            paths.to_vec(),
+        ))),
+        "open" | "explore" if single_folder => Some(ItemViewerAction::Open(file.to_path_buf())),
+        "opennewtab" if single_folder => Some(ItemViewerAction::OpenInNewTab(file.to_path_buf())),
+        _ => None,
+    }
+}
+
+/// The egui item menu: drives and Recycle Bin items, and Eden's entries
+/// alone when there is no window for the native menu.
 #[allow(clippy::too_many_arguments)]
 fn handle_context_menu_actions(
     ui: &mut egui::Ui,
@@ -199,13 +404,12 @@ fn handle_context_menu_actions(
     is_recycle_bin_view: bool,
     is_cut: bool,
     action: &mut Option<ItemViewerAction>,
-    _palette: &ThemePalette,
+    palette: &ThemePalette,
     explorer_state: &mut ExplorerState,
-    hwnd: Option<HWND>,
 ) {
     // Apply context-menu-specific typography
-    apply_eden_visual_overrides(ui, _palette);
-    apply_eden_text_overrides(ui, _palette);
+    apply_eden_visual_overrides(ui, palette);
+    apply_eden_text_overrides(ui, palette);
 
     // Match Explorer behavior: right-click selects if not already selected
     if !is_selected {
@@ -263,83 +467,35 @@ fn handle_context_menu_actions(
         return;
     }
 
-    // --- NORMAL FILE VIEW ---
-
-    // Eden's own entries, minus the ones hidden in the settings.
-    let eden_slots = eden_menu_entries::visible_slots();
-    for slot in &eden_slots {
+    // Files and folders without a window handle: Eden's own entries only.
+    for slot in eden_menu_entries::visible_slots() {
         let entry = match slot {
             EdenMenuSlot::Separator => {
                 ui.separator();
                 continue;
             }
-            EdenMenuSlot::Entry(entry) => *entry,
+            EdenMenuSlot::Entry(entry) => entry,
         };
-        if let Some(entry_action) =
-            draw_eden_menu_entry(ui, i18n, entry, file, &context_paths, is_cut, paste_enabled)
-        {
-            *action = Some(entry_action);
+        let (enabled, label) = eden_entry_state(i18n, entry, &context_paths, is_cut, paste_enabled);
+        if ui.add_enabled(enabled, egui::Button::new(label)).clicked() {
+            if let Some(entry_action) = eden_entry_action(entry, &file.path, &context_paths) {
+                *action = Some(entry_action);
+            }
             ui.close();
         }
     }
-
-    let selected_paths = context_paths;
-    let cache_miss = explorer_state
-        .windows_context_menu_cache
-        .as_ref()
-        .map(|cache| {
-            cache.selection != selected_paths
-                // Entries were hidden/shown in the settings since the build.
-                || cache.menu.hidden_version() != shell_context_menu::hidden_entries_version()
-        })
-        .unwrap_or(true);
-
-    if cache_miss {
-        if let Some(hwnd) = hwnd {
-            explorer_state.windows_context_menu_cache =
-                ShellContextMenu::for_paths(&selected_paths, hwnd)
-                    .map(
-                        |menu| crate::gui::windows::containers::structs::WindowsContextMenuCache {
-                            selection: selected_paths.clone(),
-                            menu,
-                        },
-                    )
-                    .map(Some)
-                    .unwrap_or_else(|err| {
-                        eprintln!("Windows menu load failed: {}", err);
-                        None
-                    });
-        } else {
-            explorer_state.windows_context_menu_cache = None;
-        }
-    }
-
-    // The Windows shell menu follows Eden's entries, with its cascading
-    // submenus as egui submenus.
-    if !eden_slots.is_empty() {
-        ui.separator();
-    }
-    if let Some(cache) = explorer_state.windows_context_menu_cache.as_ref() {
-        draw_shell_menu_nodes(ui, &cache.menu, "root", cache.menu.nodes(), hwnd, _palette);
-    } else if hwnd.is_none() {
-        ui.label(i18n.tr("contextmenu_windows_menu_available_missing"));
-    } else {
-        ui.label(i18n.tr("contextmenu_windows_menu_unavailable"));
-    }
 }
 
-/// Draws one of Eden's item-menu entries; returns its action when clicked.
-fn draw_eden_menu_entry(
-    ui: &mut egui::Ui,
+/// Whether one of Eden's item-menu entries is enabled, and its label.
+fn eden_entry_state(
     i18n: &I18n,
     entry: EdenMenuEntry,
-    file: &FileItem,
     context_paths: &[PathBuf],
     is_cut: bool,
     paste_enabled: bool,
-) -> Option<ItemViewerAction> {
+) -> (bool, String) {
     let single = context_paths.len() == 1;
-    let (enabled, label) = match entry {
+    match entry {
         EdenMenuEntry::OpenInNewTab => (single, i18n.tr(entry.label_key())),
         EdenMenuEntry::OpenInSplitView => (
             single && context_paths.first().is_some_and(|p| p.is_dir()),
@@ -361,11 +517,16 @@ fn draw_eden_menu_entry(
         | EdenMenuEntry::Rename
         | EdenMenuEntry::Delete
         | EdenMenuEntry::Properties => (true, i18n.tr(entry.label_key())),
-    };
-    if !ui.add_enabled(enabled, menu_item(label)).clicked() {
-        return None;
     }
+}
 
+/// The action of one of Eden's item-menu entries; `file` is the
+/// right-clicked item, `context_paths` what the menu acts on.
+fn eden_entry_action(
+    entry: EdenMenuEntry,
+    file: &Path,
+    context_paths: &[PathBuf],
+) -> Option<ItemViewerAction> {
     let paths = || context_paths.to_vec();
     let first = context_paths.first().cloned();
     match entry {
@@ -385,7 +546,7 @@ fn draw_eden_menu_entry(
             ItemViewerContextAction::CopyPath(paths()),
         )),
         EdenMenuEntry::Paste => Some(ItemViewerAction::Context(ItemViewerContextAction::Paste)),
-        EdenMenuEntry::Rename => Some(ItemViewerAction::StartEdit(file.path.clone())),
+        EdenMenuEntry::Rename => Some(ItemViewerAction::StartEdit(file.to_path_buf())),
         EdenMenuEntry::Delete => Some(ItemViewerAction::Context(ItemViewerContextAction::Delete(
             paths(),
         ))),
@@ -393,117 +554,6 @@ fn draw_eden_menu_entry(
             ItemViewerContextAction::Properties(paths()),
         )),
     }
-}
-
-/// A context menu entry with a leading icon column (blank here), so Eden's
-/// entries line up with the shell entries and their icons.
-fn menu_item<'a>(text: impl Into<egui::WidgetText>) -> egui::Button<'a> {
-    egui::Button::new((menu_icon_atom(None), text.into()))
-}
-
-/// The leading icon cell of a context menu entry: the icon, or blank space
-/// of the same size.
-fn menu_icon_atom<'a>(texture: Option<&egui::TextureHandle>) -> egui::Atom<'a> {
-    let size = egui::Vec2::splat(MENU_ICON_SIZE);
-    match texture {
-        Some(texture) => {
-            egui::Image::from_texture(egui::load::SizedTexture::new(texture.id(), size))
-                .fit_to_exact_size(size)
-                .atom_size(size)
-        }
-        None => egui::Atom {
-            size: Some(size),
-            ..Default::default()
-        },
-    }
-}
-
-fn shell_icon_atom<'a>(ui: &egui::Ui, menu: &ShellContextMenu, icon: &MenuIcon) -> egui::Atom<'a> {
-    menu_icon_atom(menu.icon_texture(ui.ctx(), icon).as_ref())
-}
-
-/// Renders shell context menu entries; cascading shell submenus become egui
-/// submenus whose children are read from the shell on first open.
-fn draw_shell_menu_nodes(
-    ui: &mut egui::Ui,
-    menu: &ShellContextMenu,
-    level: &str,
-    nodes: &[ShellMenuNode],
-    hwnd: Option<HWND>,
-    palette: &ThemePalette,
-) {
-    for node in nodes {
-        match node {
-            ShellMenuNode::Separator => {
-                ui.separator();
-            }
-            ShellMenuNode::Command {
-                id,
-                label,
-                disabled,
-                is_default,
-                icon,
-            } => {
-                let mut text = egui::RichText::new(label);
-                if *is_default {
-                    text = text.strong();
-                }
-                let button = egui::Button::new((shell_icon_atom(ui, menu, icon), text));
-                if ui.add_enabled(!disabled, button).clicked() {
-                    if let Some(hwnd) = hwnd {
-                        if let Err(err) = menu.invoke(hwnd, *id) {
-                            eprintln!("Windows menu invoke failed: {}", err);
-                        }
-                    }
-                    ui.close();
-                }
-            }
-            ShellMenuNode::Submenu(submenu) => {
-                let button = egui::Button::new((
-                    shell_icon_atom(ui, menu, &submenu.icon),
-                    submenu.label.as_str(),
-                ))
-                .right_text(regular::CARET_RIGHT);
-                // A submenu that turned out to be empty once populated stays
-                // visible but disabled, like an unavailable command.
-                if submenu.disabled || submenu.is_known_empty() {
-                    ui.add_enabled(false, button);
-                    continue;
-                }
-                egui::containers::menu::SubMenuButton::from_button(button).ui(ui, |ui| {
-                    // Submenus are separate popups: re-apply the menu styling.
-                    apply_eden_visual_overrides(ui, palette);
-                    apply_eden_text_overrides(ui, palette);
-                    // Populated on the first frame the submenu is open; later
-                    // frames reuse the cache unless the shell added items.
-                    let children = menu.submenu_children(submenu);
-                    if submenu.is_settling() {
-                        ui.ctx()
-                            .request_repaint_after(std::time::Duration::from_millis(100));
-                    }
-                    // The popup's Ui is only as tall as the popup was last
-                    // frame; lift that limit so the scroll area can grow when
-                    // the shell adds items (it still shrinks to its content).
-                    let max_height = ui.ctx().viewport_rect().height() * 0.6;
-                    ui.set_max_height(max_height);
-                    egui::ScrollArea::vertical()
-                        .id_salt(("shell_context_submenu", submenu.key()))
-                        .max_height(max_height)
-                        .show(ui, |ui| {
-                            draw_shell_menu_nodes(
-                                ui,
-                                menu,
-                                &submenu.label,
-                                &children,
-                                hwnd,
-                                palette,
-                            );
-                        });
-                });
-            }
-        }
-    }
-    menu.log_icon_stats(level);
 }
 
 pub fn handle_draw_col_name(
@@ -2502,4 +2552,42 @@ pub fn draw_empty_item_viewer_area(
     }
 
     action
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn shell_verbs_routed_to_eden() {
+        use ItemViewerAction as A;
+        use ItemViewerContextAction as C;
+        let file = PathBuf::from(r"C:\data\folder");
+        let single = vec![file.clone()];
+        let both = vec![file.clone(), PathBuf::from(r"C:\data\other.txt")];
+        let route = |verb: &str, is_dir: bool, paths: &[PathBuf]| {
+            shell_verb_action(verb, &file, is_dir, paths)
+        };
+
+        assert!(matches!(route("rename", false, &both), Some(A::StartEdit(p)) if p == file));
+        // Canonical verbs are matched case-insensitively.
+        assert!(matches!(
+            route("Delete", false, &both),
+            Some(A::Context(C::Delete(p))) if p == both
+        ));
+        assert!(matches!(route("cut", false, &single), Some(A::Context(C::Cut(_)))));
+        assert!(matches!(route("copy", false, &single), Some(A::Context(C::Copy(_)))));
+
+        // Opening navigates in Eden for a single real folder only.
+        assert!(matches!(route("open", true, &single), Some(A::Open(p)) if p == file));
+        assert!(matches!(route("explore", true, &single), Some(A::Open(_))));
+        assert!(matches!(route("opennewtab", true, &single), Some(A::OpenInNewTab(_))));
+        assert!(route("open", false, &single).is_none());
+        assert!(route("open", true, &both).is_none());
+
+        // Left to the shell.
+        for verb in ["paste", "properties", "link", "copyaspath", "openas", ""] {
+            assert!(route(verb, true, &single).is_none(), "{verb}");
+        }
+    }
 }

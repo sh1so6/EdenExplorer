@@ -1,0 +1,40 @@
+# Item context menu timing. Probe mode never shows the native menu (it would
+# use the real cursor), but the shell menu is still built and prepared, so
+# stderr gets the "[shell-menu]" timings (debug / ui-probe builds only).
+# Run directly with a scratch folder as launch path (ui-probe.ps1 passes no
+# args), e.g. from bash:
+#   mkdir -p "$TEMP/eden-ctx-scratch/sub folder"; echo hi > "$TEMP/eden-ctx-scratch/notes.txt"
+#   EDEN_PROBE_SCRIPT=<abs path of this file> EDEN_PROBE_DATA_DIR=<scratch data dir> \
+#     target/probe/release/EdenExplorer.exe "%TEMP%\eden-ctx-scratch" 2> stderr.log
+# Set EDEN_PROBE_NO_WARM_UP=1 to measure without the startup warm-up.
+# Row 1 (y=104) is "sub folder", row 2 (y=124) is notes.txt.
+size 1117 717
+wait_ms 3000
+# Normal right-click: first open, reopen (same selection), other item.
+click 340 124 right
+wait_ms 800
+key Escape
+wait_ms 300
+click 340 124 right
+wait_ms 800
+key Escape
+wait_ms 300
+click 340 104 right
+wait_ms 800
+key Escape
+wait_ms 300
+# Shift+right-click: full menu.
+click 340 124 right shift
+wait_ms 800
+click 340 124 right shift
+wait_ms 800
+click 340 104 right shift
+wait_ms 800
+key Escape
+wait_ms 300
+# Normal again after the Shift ones.
+click 340 124 right
+wait_ms 800
+key Escape
+wait_ms 300
+quit

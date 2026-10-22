@@ -144,7 +144,7 @@ enum Command {
     Move(egui::Pos2),
     Down(egui::PointerButton),
     Up(egui::PointerButton),
-    Click(egui::Pos2, egui::PointerButton),
+    Click(egui::Pos2, egui::PointerButton, egui::Modifiers),
     Drag {
         from: egui::Pos2,
         to: egui::Pos2,
@@ -213,7 +213,11 @@ fn parse_command(line: &str) -> Result<Command, String> {
         "move" => Ok(Command::Move(egui::pos2(num(0)?, num(1)?))),
         "down" => Ok(Command::Down(button(0)?)),
         "up" => Ok(Command::Up(button(0)?)),
-        "click" => Ok(Command::Click(egui::pos2(num(0)?, num(1)?), button(2)?)),
+        "click" => Ok(Command::Click(
+            egui::pos2(num(0)?, num(1)?),
+            button(2)?,
+            parse_modifiers(args.get(3..).unwrap_or_default())?,
+        )),
         "drag" => {
             let steps = if args.len() > 4 { count(4)? } else { 10 };
             Ok(Command::Drag {
@@ -227,19 +231,7 @@ fn parse_command(line: &str) -> Result<Command, String> {
             let key_name = args.first().ok_or("missing key name")?;
             let key = egui::Key::from_name(key_name)
                 .ok_or_else(|| format!("unknown key '{key_name}'"))?;
-            let mut modifiers = egui::Modifiers::NONE;
-            for flag in &args[1..] {
-                match flag.to_ascii_lowercase().as_str() {
-                    "ctrl" => {
-                        modifiers.ctrl = true;
-                        modifiers.command = true;
-                    }
-                    "shift" => modifiers.shift = true,
-                    "alt" => modifiers.alt = true,
-                    other => return Err(format!("unknown modifier '{other}'")),
-                }
-            }
-            Ok(Command::Key(key, modifiers))
+            Ok(Command::Key(key, parse_modifiers(&args[1..])?))
         }
         "text" => {
             let rest = line[line.find(char::is_whitespace).ok_or("missing text")?..].trim_start();
@@ -254,6 +246,23 @@ fn parse_command(line: &str) -> Result<Command, String> {
         "quit" => Ok(Command::Quit),
         other => Err(format!("unknown command '{other}'")),
     }
+}
+
+/// Modifier flags (`ctrl`, `shift`, `alt`) held during a key or click.
+fn parse_modifiers(flags: &[&str]) -> Result<egui::Modifiers, String> {
+    let mut modifiers = egui::Modifiers::NONE;
+    for flag in flags {
+        match flag.to_ascii_lowercase().as_str() {
+            "ctrl" => {
+                modifiers.ctrl = true;
+                modifiers.command = true;
+            }
+            "shift" => modifiers.shift = true,
+            "alt" => modifiers.alt = true,
+            other => return Err(format!("unknown modifier '{other}'")),
+        }
+    }
+    Ok(modifiers)
 }
 
 // ---------------------------------------------------------------------------
@@ -396,16 +405,30 @@ impl Runner {
                 let event = self.press(button, false);
                 self.queue.extend([Self::input(vec![event]), settle]);
             }
-            Command::Click(pos, button) => {
+            Command::Click(pos, button, modifiers) => {
                 self.pointer = pos;
-                let down = self.press(button, true);
-                let up = self.press(button, false);
+                let with_modifiers = |event: egui::Event| match event {
+                    egui::Event::PointerButton {
+                        pos,
+                        button,
+                        pressed,
+                        ..
+                    } => egui::Event::PointerButton {
+                        pos,
+                        button,
+                        pressed,
+                        modifiers,
+                    },
+                    other => other,
+                };
+                let down = with_modifiers(self.press(button, true));
+                let up = with_modifiers(self.press(button, false));
                 self.queue.extend([
-                    Self::input(vec![egui::Event::PointerMoved(pos)]),
+                    Step::Input(vec![egui::Event::PointerMoved(pos)], modifiers),
                     Step::WaitFrames(1),
-                    Self::input(vec![down]),
+                    Step::Input(vec![down], modifiers),
                     Step::WaitFrames(1),
-                    Self::input(vec![up]),
+                    Step::Input(vec![up], modifiers),
                     settle,
                 ]);
             }
@@ -632,8 +655,15 @@ mod tests {
         assert!(matches!(lines[0].command, Ok(Command::Size(v)) if v == egui::vec2(800.0, 600.0)));
         assert!(matches!(
             lines[1].command,
-            Ok(Command::Click(p, egui::PointerButton::Secondary)) if p == egui::pos2(10.0, 20.0)
+            Ok(Command::Click(p, egui::PointerButton::Secondary, m))
+                if p == egui::pos2(10.0, 20.0) && m == egui::Modifiers::NONE
         ));
+        match parse_command("click 1 2 right shift") {
+            Ok(Command::Click(_, egui::PointerButton::Secondary, modifiers)) => {
+                assert!(modifiers.shift && !modifiers.ctrl && !modifiers.alt);
+            }
+            other => panic!("unexpected {other:?}"),
+        }
         assert!(matches!(
             lines[2].command,
             Ok(Command::Drag { steps: 10, .. })

@@ -1,48 +1,55 @@
+//! The Windows shell context menu of files and folders, shown natively
+//! (`TrackPopupMenuEx`) with an optional application submenu at the top.
+//!
+//! Also keeps the user's hidden-entry preferences (`context_menu.json`) and
+//! the entries of the most recently opened menu for the settings page.
+
 use crate::core::indexer::{load_context_menu_settings, save_context_menu_settings};
-use eframe::egui;
-use std::cell::{Cell, OnceCell, RefCell};
+use std::cell::{Cell, RefCell};
 use std::collections::{HashMap, HashSet};
 use std::mem::{ManuallyDrop, size_of};
 use std::os::windows::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use std::time::{Duration, Instant};
-use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, RECT, WPARAM};
-use windows::Win32::Graphics::Gdi::{
-    BI_RGB, BITMAP, BITMAPINFO, BITMAPINFOHEADER, CreateCompatibleDC, CreateDIBSection,
-    DIB_RGB_COLORS, DeleteDC, DeleteObject, GdiFlush, GetDC, GetDIBits, GetObjectW, HBITMAP,
-    HGDIOBJ, ReleaseDC, SelectObject,
-};
+use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, POINT, WPARAM};
 use windows::Win32::System::Com::CoTaskMemFree;
-use windows::Win32::UI::Controls::{
-    DRAWITEMSTRUCT, MEASUREITEMSTRUCT, ODA_DRAWENTIRE, ODS_FLAGS, ODT_MENU,
-};
+use windows::Win32::UI::Input::KeyboardAndMouse::{GetKeyState, VK_CONTROL, VK_SHIFT};
 use windows::Win32::UI::Shell::Common::ITEMIDLIST;
 use windows::Win32::UI::Shell::{
-    CMF_EXTENDEDVERBS, CMF_NORMAL, CMINVOKECOMMANDINFO, CMINVOKECOMMANDINFOEX, DEFCONTEXTMENU,
-    GCS_VERBW, IContextMenu, IContextMenu2, IContextMenu3, ILCreateFromPathW, ILFindLastID,
-    IShellFolder, SHBindToParent, SHCreateDefaultContextMenu,
+    CMF_EXTENDEDVERBS, CMF_NORMAL, CMIC_MASK_CONTROL_DOWN, CMIC_MASK_PTINVOKE,
+    CMIC_MASK_SHIFT_DOWN, CMINVOKECOMMANDINFO, CMINVOKECOMMANDINFOEX,
+    DEFCONTEXTMENU, GCS_VERBW, IContextMenu, IContextMenu2, IContextMenu3, ILCreateFromPathW,
+    ILFindLastID, IShellFolder, SHBindToParent, SHCreateDefaultContextMenu,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
-    CreatePopupMenu, DeleteMenu, DestroyMenu, GetMenuItemCount, GetMenuItemInfoW, HMENU,
-    MENUITEMINFOW, MF_BYPOSITION, MFS_DEFAULT, MFS_DISABLED, MFT_OWNERDRAW, MFT_SEPARATOR,
-    MIIM_BITMAP, MIIM_DATA, MIIM_FTYPE, MIIM_ID, MIIM_STATE, MIIM_STRING, MIIM_SUBMENU, RemoveMenu,
-    TPM_RETURNCMD, TPM_RIGHTBUTTON, TrackPopupMenuEx, WM_DRAWITEM, WM_INITMENUPOPUP,
-    WM_MEASUREITEM, WM_MENUCHAR,
+    AppendMenuW, CreatePopupMenu, DeleteMenu, DestroyMenu, GetCursorPos, GetMenuItemCount,
+    GetMenuItemInfoW, HMENU, InsertMenuItemW, MENUITEMINFOW, MF_BYPOSITION, MF_GRAYED,
+    MF_SEPARATOR, MF_STRING, MFT_SEPARATOR, MFT_STRING, MIIM_FTYPE, MIIM_ID, MIIM_STRING,
+    MIIM_SUBMENU, RemoveMenu, TPM_RETURNCMD, TPM_RIGHTBUTTON, TrackPopupMenuEx, WM_DRAWITEM,
+    WM_INITMENUPOPUP, WM_MEASUREITEM, WM_MENUCHAR,
 };
 use windows::core::{Error, HRESULT, Interface, PCSTR, PCWSTR, PSTR, PWSTR};
 
+/// Command ids handed to the shell (`QueryContextMenu`'s inclusive
+/// `idCmdFirst..=idCmdLast`). 0 is what `TrackPopupMenuEx` returns when the
+/// menu is cancelled, so no command may use it.
 const CONTEXT_MENU_ID_BASE: u32 = 1;
 const CONTEXT_MENU_ID_MAX: u32 = 0x7FFF;
-
-/// Logical size (points) of the icons shown next to shell menu entries.
-pub const MENU_ICON_SIZE: f32 = 16.0;
+/// Command ids of the application submenu's entries, right after the shell
+/// range (never handed to the shell, so they cannot collide with its ids).
+/// Menu ids are 16-bit in `WM_COMMAND`; the range stays below `0xFFFF`.
+const APP_MENU_ID_BASE: u32 = 0x8000;
+const APP_MENU_ID_MAX: u32 = 0xBFFF;
+/// `CMIC_MASK_UNICODE` (same value as `SEE_MASK_UNICODE`; not exported by
+/// the `windows` crate).
+const CMIC_MASK_UNICODE: u32 = 0x0000_4000;
 
 /// Debug/probe-only diagnostics. Release builds compile the call to a no-op,
 /// but the arguments still count as used so no cfg juggling is needed at the
 /// call sites.
 #[inline(always)]
-fn debug_log(args: std::fmt::Arguments<'_>) {
+pub fn debug_log(args: std::fmt::Arguments<'_>) {
     #[cfg(any(debug_assertions, feature = "ui-probe"))]
     eprintln!("[shell-menu] {args}");
     #[cfg(not(any(debug_assertions, feature = "ui-probe")))]
@@ -53,8 +60,8 @@ fn debug_log(args: std::fmt::Arguments<'_>) {
 // Hidden entries (user preference, persisted in `context_menu.json`)
 // ---------------------------------------------------------------------------
 
-/// An entry of the most recently built shell menu (root and every submenu
-/// populated since), listed on the settings page so it can be hidden.
+/// An entry of the most recently shown shell menu (root and every submenu
+/// opened since), listed on the settings page so it can be hidden.
 #[derive(Clone, Debug)]
 pub struct SeenMenuEntry {
     /// Matching key, see [`entry_key`].
@@ -74,16 +81,13 @@ struct MenuPrefs {
     hidden: HashSet<String>,
     /// Display labels of hidden keys (persisted with them).
     labels: std::collections::BTreeMap<String, String>,
-    /// Bumped on every change of `hidden`, so cached shell menus know they
-    /// are outdated.
-    version: u64,
     seen: Vec<SeenMenuEntry>,
     /// Hidden entries of Eden's own item menu (`eden:` keys, see
     /// [`crate::gui::windows::eden_menu_entries`]). Kept apart from `hidden`
     /// so they never show up among the shell entries in the settings.
     eden_hidden: HashSet<String>,
-    /// Bumped on every change of `eden_hidden`. Separate from `version`:
-    /// toggling Eden's entries must not rebuild the cached shell menu.
+    /// Bumped on every change of `eden_hidden` (see
+    /// [`eden_entries_version`]).
     eden_version: u64,
 }
 
@@ -93,17 +97,10 @@ impl MenuPrefs {
         Self {
             hidden: snapshot.hidden.into_iter().collect(),
             labels: snapshot.labels,
-            version: 0,
             seen: Vec::new(),
             eden_hidden: snapshot.eden_hidden.into_iter().collect(),
             eden_version: 0,
         }
-    }
-
-    /// Saves after a change of the shell entries.
-    fn save_shell(&mut self) {
-        self.version += 1;
-        self.save();
     }
 
     /// Saves after a change of Eden's entries.
@@ -140,11 +137,6 @@ fn with_prefs<R>(f: impl FnOnce(&mut MenuPrefs) -> R) -> R {
     })
 }
 
-/// Changes whenever the set of hidden entries changes.
-pub fn hidden_entries_version() -> u64 {
-    with_prefs(|prefs| prefs.version)
-}
-
 /// Hides or shows a shell menu entry and saves the preference immediately.
 pub fn set_entry_hidden(key: &str, path_label: &str, hidden: bool) {
     with_prefs(|prefs| {
@@ -155,7 +147,7 @@ pub fn set_entry_hidden(key: &str, path_label: &str, hidden: bool) {
             prefs.hidden.remove(key)
         };
         if changed {
-            prefs.save_shell();
+            prefs.save();
         }
     });
 }
@@ -165,13 +157,12 @@ pub fn reset_hidden_entries() {
     with_prefs(|prefs| {
         if !prefs.hidden.is_empty() {
             prefs.hidden.clear();
-            prefs.save_shell();
+            prefs.save();
         }
     });
 }
 
-/// Changes whenever the set of hidden Eden entries changes (independent of
-/// [`hidden_entries_version`]).
+/// Changes whenever the set of hidden Eden entries changes.
 pub fn eden_entries_version() -> u64 {
     with_prefs(|prefs| prefs.eden_version)
 }
@@ -182,7 +173,7 @@ pub fn hidden_eden_entries() -> HashSet<String> {
 }
 
 /// Hides or shows one of Eden's own item-menu entries and saves the
-/// preference immediately. Does not invalidate cached shell menus.
+/// preference immediately.
 pub fn set_eden_entry_hidden(key: &str, hidden: bool) {
     with_prefs(|prefs| {
         let changed = if hidden {
@@ -242,6 +233,28 @@ fn hidden_set() -> HashSet<String> {
 
 fn record_seen_root(entries: Vec<SeenMenuEntry>) {
     with_prefs(|prefs| prefs.seen = entries);
+}
+
+/// Replaces the top-level entries after the root of the same menu was read
+/// again, keeping the children recorded for its submenus since.
+fn update_seen_root(entries: Vec<SeenMenuEntry>) {
+    with_prefs(|prefs| {
+        // Children follow their top-level entry (depth first).
+        let mut children: HashMap<String, Vec<SeenMenuEntry>> = HashMap::new();
+        let mut top_level: Option<String> = None;
+        for entry in std::mem::take(&mut prefs.seen) {
+            if entry.depth == 0 {
+                top_level = Some(entry.key.clone());
+            } else if let Some(key) = &top_level {
+                children.entry(key.clone()).or_default().push(entry);
+            }
+        }
+        for entry in entries {
+            let kept = children.remove(&entry.key);
+            prefs.seen.push(entry);
+            prefs.seen.extend(kept.into_iter().flatten());
+        }
+    });
 }
 
 /// Records the children of a submenu right after the submenu's own entry
@@ -357,127 +370,8 @@ fn level_keys(
 }
 
 // ---------------------------------------------------------------------------
-// Menu tree
+// Shell menu messages
 // ---------------------------------------------------------------------------
-
-/// One entry of the shell context menu, mirroring the native HMENU tree.
-pub enum ShellMenuNode {
-    Command {
-        /// Global command id (unique across all submenus of the menu).
-        id: u32,
-        label: String,
-        disabled: bool,
-        /// The default verb (rendered bold by Explorer).
-        is_default: bool,
-        icon: MenuIcon,
-    },
-    Submenu(ShellSubmenu),
-    Separator,
-}
-
-/// Icon of a shell menu entry, converted to an egui texture on first use and
-/// then cached for the lifetime of the menu.
-pub struct MenuIcon {
-    source: IconSource,
-    texture: OnceCell<Option<egui::TextureHandle>>,
-}
-
-impl MenuIcon {
-    fn new(source: IconSource) -> Self {
-        Self {
-            source,
-            texture: OnceCell::new(),
-        }
-    }
-
-    /// An entry without icon.
-    #[cfg(test)]
-    pub fn none() -> Self {
-        Self::new(IconSource::None)
-    }
-}
-
-#[derive(Clone, Copy)]
-enum IconSource {
-    None,
-    /// A real bitmap (`MENUITEMINFOW::hbmpItem`), owned by the menu item.
-    Bitmap(HBITMAP),
-    /// `HBMMENU_CALLBACK`: the owner measures and draws just the bitmap on
-    /// `WM_MEASUREITEM` / `WM_DRAWITEM`.
-    Callback {
-        hmenu: HMENU,
-        id: u32,
-        item_data: usize,
-    },
-    /// `MFT_OWNERDRAW` item with a text label: the owner draws the complete
-    /// item; the icon is cropped from its left end.
-    OwnerDraw {
-        hmenu: HMENU,
-        id: u32,
-        item_data: usize,
-    },
-}
-
-/// A cascading shell submenu whose children are read lazily.
-///
-/// Many shell submenus ("Send to", "Open with", "New", most third-party
-/// cascades) are empty until the menu host sends `WM_INITMENUPOPUP` for them,
-/// so `WM_INITMENUPOPUP` is sent (once) when the submenu is first shown.
-///
-/// Some of them keep filling the HMENU asynchronously afterwards (on Windows
-/// 11 "Send to" first contains only "Bluetooth device" and receives the
-/// SendTo folder entries and drives a few hundred ms later), so the children
-/// are re-read whenever the HMENU's item count changes.
-pub struct ShellSubmenu {
-    pub label: String,
-    pub disabled: bool,
-    pub icon: MenuIcon,
-    /// Hide-matching key of the submenu entry itself.
-    key: String,
-    /// Labels of the enclosing submenus plus this one (parents of children).
-    path: Vec<String>,
-    /// Owned by the root menu of the [`ShellContextMenu`]; destroyed with it.
-    hmenu: HMENU,
-    index_in_parent: u32,
-    /// When `WM_INITMENUPOPUP` was sent (populated at most once).
-    initialized_at: OnceCell<Instant>,
-    /// Collected children and the HMENU item count they were read from.
-    children: RefCell<Option<(i32, Rc<Vec<ShellMenuNode>>)>>,
-}
-
-/// How long after initialization a submenu is watched for asynchronously
-/// added items (see [`ShellSubmenu::is_settling`]).
-/// Generous because "Send to" also enumerates (possibly slow) network drives.
-const SUBMENU_SETTLE_TIME: Duration = Duration::from_secs(10);
-
-impl ShellSubmenu {
-    /// True when the submenu was populated, has no visible entries and the
-    /// HMENU has not changed since (cheap; does not populate).
-    pub fn is_known_empty(&self) -> bool {
-        match &*self.children.borrow() {
-            Some((count, children)) => children.is_empty() && *count == self.item_count(),
-            None => false,
-        }
-    }
-
-    /// True shortly after initialization, while the shell may still be adding
-    /// items asynchronously. The UI keeps repainting meanwhile so new items
-    /// show up without user input.
-    pub fn is_settling(&self) -> bool {
-        self.initialized_at
-            .get()
-            .is_some_and(|at| at.elapsed() < SUBMENU_SETTLE_TIME)
-    }
-
-    /// Stable per-menu key, e.g. for egui id salts.
-    pub fn key(&self) -> usize {
-        self.hmenu.0 as usize
-    }
-
-    fn item_count(&self) -> i32 {
-        unsafe { GetMenuItemCount(Some(self.hmenu)) }
-    }
-}
 
 /// `HandleMenuMsg(2)` forwarding for a shell context menu.
 #[derive(Clone)]
@@ -514,24 +408,39 @@ impl MenuMsgHandler {
     }
 }
 
+
 // ---------------------------------------------------------------------------
-// Native (TrackPopupMenuEx) mode
+// Native (TrackPopupMenuEx) menu
 // ---------------------------------------------------------------------------
 
-/// Removes hidden entries from the native HMENU tree: the root before the
-/// menu is shown and each submenu after the shell populated it
-/// (`WM_INITMENUPOPUP`). Items a shell extension adds later asynchronously
-/// are not seen (best effort).
+/// Removes hidden entries from the native HMENU tree and records the entries
+/// for the settings page: the root before the menu is shown and each submenu
+/// after the shell populated it (`WM_INITMENUPOPUP`). Items a shell extension
+/// adds later asynchronously are not seen (best effort).
 struct NativePruner {
     context_menu: Option<IContextMenu>,
     id_base: u32,
     hidden: HashSet<String>,
+    root: HMENU,
     /// Menus that may be pruned: HMENU -> (entry key, label path). The root
     /// has an empty key and path.
     menus: RefCell<HashMap<usize, (String, Vec<String>)>>,
     /// Removed (not destroyed) submenus; the shell may still reference them
     /// while the menu is alive, so they are destroyed with the menu.
     detached: RefCell<Vec<HMENU>>,
+    /// Entries removed from a menu by an earlier pass. A submenu shown again
+    /// is pruned (and recorded) again, but the HMENU no longer contains them;
+    /// they stay listed in place of the settings page all the same.
+    removed: RefCell<HashMap<usize, Vec<SeenMenuEntry>>>,
+    /// The application submenu inserted into the root: never pruned,
+    /// recorded or registered for pruning.
+    app_menu: Cell<Option<HMENU>>,
+    /// Root item count once the menu was prepared. `WM_INITMENUPOPUP` for the
+    /// root finds nothing new to prune while the count is unchanged.
+    settled_root_count: Cell<Option<i32>>,
+    /// Whether the root was recorded (a new menu replaces the entries of the
+    /// previous one; a later read of the root keeps the submenu children).
+    root_recorded: Cell<bool>,
 }
 
 impl NativePruner {
@@ -551,8 +460,13 @@ impl NativePruner {
             context_menu,
             id_base,
             hidden,
+            root,
             menus: RefCell::new(menus),
             detached: RefCell::new(Vec::new()),
+            removed: RefCell::new(HashMap::new()),
+            app_menu: Cell::new(None),
+            settled_root_count: Cell::new(None),
+            root_recorded: Cell::new(false),
         }
     }
 
@@ -560,8 +474,14 @@ impl NativePruner {
         let Some((menu_key, parents)) = self.menus.borrow().get(&(menu.0 as usize)).cloned() else {
             return;
         };
-
         let count = unsafe { GetMenuItemCount(Some(menu)) };
+        let is_root = menu == self.root;
+        if is_root && self.settled_root_count.get() == Some(count) {
+            return;
+        }
+        let started = Instant::now();
+        let app_menu = self.app_menu.get();
+
         let mut buffer = Vec::new();
         // (position, label, command id, submenu)
         let mut items: Vec<(u32, String, Option<u32>, Option<HMENU>)> = Vec::new();
@@ -573,6 +493,9 @@ impl NativePruner {
                 continue;
             }
             let submenu = (!item.info.hSubMenu.is_invalid()).then_some(item.info.hSubMenu);
+            if submenu.is_some() && submenu == app_menu {
+                continue;
+            }
             let id = (submenu.is_none() && item.info.wID != 0).then_some(item.info.wID);
             items.push((index, item.label, id, submenu));
         }
@@ -589,27 +512,25 @@ impl NativePruner {
             .collect();
         let keys = level_keys(&level, &key_input, &mut stats);
 
-        if !menu_key.is_empty() {
-            record_seen_children(
-                &menu_key,
-                items
-                    .iter()
-                    .zip(&keys)
-                    .map(|((_, label, _, submenu), key)| SeenMenuEntry {
-                        key: key.clone(),
-                        label: label.clone(),
-                        path_label: path_label(&parents, label),
-                        depth: parents.len(),
-                        is_submenu: submenu.is_some(),
-                        parent: menu_key.clone(),
-                    })
-                    .collect(),
-            );
-        }
+        let mut seen: Vec<SeenMenuEntry> = items
+            .iter()
+            .zip(&keys)
+            .map(|((_, label, _, submenu), key)| SeenMenuEntry {
+                key: key.clone(),
+                label: label.clone(),
+                path_label: path_label(&parents, label),
+                depth: parents.len(),
+                is_submenu: submenu.is_some(),
+                parent: menu_key.clone(),
+            })
+            .collect();
 
         // Back to front, so the positions of the remaining items stay valid.
         let mut removed = 0;
-        for ((index, label, _, submenu), key) in items.iter().zip(&keys).rev() {
+        let mut removed_entries = Vec::new();
+        for (((index, label, _, submenu), key), entry) in
+            items.iter().zip(&keys).zip(&seen).rev()
+        {
             if self.hidden.contains(key) {
                 let result = unsafe {
                     match submenu {
@@ -622,6 +543,7 @@ impl NativePruner {
                 };
                 if result.is_ok() {
                     removed += 1;
+                    removed_entries.push(entry.clone());
                 }
             } else if let Some(submenu) = submenu {
                 let mut path = parents.clone();
@@ -631,13 +553,36 @@ impl NativePruner {
                     .insert(submenu.0 as usize, (key.clone(), path));
             }
         }
+
+        {
+            let mut removed_by_menu = self.removed.borrow_mut();
+            let earlier = removed_by_menu.entry(menu.0 as usize).or_default();
+            for entry in earlier.iter() {
+                if !seen.iter().any(|seen| seen.key == entry.key) {
+                    seen.push(entry.clone());
+                }
+            }
+            earlier.extend(removed_entries.into_iter().rev());
+        }
+        if is_root {
+            if self.root_recorded.replace(true) {
+                update_seen_root(seen);
+            } else {
+                record_seen_root(seen);
+            }
+        } else {
+            record_seen_children(&menu_key, seen);
+        }
+
         if removed > 0 {
             normalize_native_separators(menu);
-            debug_log(format_args!(
-                "native: removed {removed} hidden entries from '{}'",
-                parents.join(" > ")
-            ));
         }
+        debug_log(format_args!(
+            "prune '{}': {} entries, {removed} hidden removed in {:.2} ms ({stats})",
+            parents.join(" > "),
+            items.len(),
+            started.elapsed().as_secs_f64() * 1000.0,
+        ));
     }
 }
 
@@ -676,6 +621,9 @@ struct ActiveNativeMenu {
     handler: MenuMsgHandler,
     /// `None` for the unfiltered standard menu.
     pruner: Option<Rc<NativePruner>>,
+    /// The application submenu (as `usize`), whose messages are not the
+    /// shell's business.
+    app_menu: Option<usize>,
 }
 
 thread_local! {
@@ -710,18 +658,25 @@ impl Drop for ActiveNativeMenuGuard {
 /// accelerators) and returns the result to give back to Windows. Returns
 /// `None` when no shell menu is active or the message was not handled, in
 /// which case the caller must continue with its default handling.
+///
+/// Messages about the application submenu are left to the default handling:
+/// the shell does not know that menu.
 pub fn forward_native_menu_message(msg: u32, wparam: WPARAM, lparam: LPARAM) -> Option<LRESULT> {
-    match msg {
-        WM_INITMENUPOPUP | WM_MENUCHAR => {}
+    let target_menu = match msg {
+        WM_INITMENUPOPUP => Some(wparam.0),
+        WM_MENUCHAR => Some(lparam.0 as usize),
         // wParam is 0 when the message was sent for a menu (not a control).
-        WM_DRAWITEM | WM_MEASUREITEM if wparam.0 == 0 => {}
+        WM_DRAWITEM | WM_MEASUREITEM if wparam.0 == 0 => None,
         _ => return None,
-    }
+    };
 
     // Clone the handler out so the RefCell is not borrowed while the shell
     // extension runs (it may pump messages and re-enter the wndproc).
     let active =
         ACTIVE_NATIVE_MENU.with(|slot| slot.try_borrow().ok().and_then(|active| active.clone()))?;
+    if target_menu.is_some() && target_menu == active.app_menu {
+        return None;
+    }
     let result = active.handler.handle(msg, wparam, lparam);
     if msg == WM_INITMENUPOPUP
         && let Some(pruner) = &active.pruner
@@ -740,42 +695,216 @@ pub fn forward_native_menu_message(msg: u32, wparam: WPARAM, lparam: LPARAM) -> 
 }
 
 // ---------------------------------------------------------------------------
+// Application submenu
+// ---------------------------------------------------------------------------
+
+/// An entry of the application's own submenu.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum AppMenuItem {
+    Command { label: String, enabled: bool },
+    Separator,
+}
+
+/// The application's own entries, shown as a submenu at the top of the shell
+/// menu.
+#[derive(Clone, Copy)]
+pub struct AppSubmenu<'a> {
+    pub label: &'a str,
+    pub items: &'a [AppMenuItem],
+}
+
+/// What the user picked in a native menu.
+pub enum NativeMenuChoice {
+    /// Closed without a command.
+    Cancelled,
+    /// The application entry at this index of [`AppSubmenu::items`].
+    App(usize),
+    /// A shell command; run it with [`ShellContextMenu::invoke`] (on the same
+    /// menu) unless the caller handles its verb itself.
+    Shell(ShellCommand),
+}
+
+/// A shell command picked in a [`ShellContextMenu`].
+pub struct ShellCommand {
+    id: u32,
+    verb: Option<String>,
+}
+
+impl ShellCommand {
+    /// The canonical verb (`GCS_VERBW`), e.g. `rename`, when the handler
+    /// provides one.
+    pub fn verb(&self) -> Option<&str> {
+        self.verb.as_deref()
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum CommandTarget {
+    Cancelled,
+    App(usize),
+    Shell(u32),
+    /// Outside both ranges (a misbehaving shell extension).
+    Unknown,
+}
+
+fn command_target(id: u32) -> CommandTarget {
+    match id {
+        0 => CommandTarget::Cancelled,
+        CONTEXT_MENU_ID_BASE..=CONTEXT_MENU_ID_MAX => CommandTarget::Shell(id),
+        APP_MENU_ID_BASE..=APP_MENU_ID_MAX => {
+            CommandTarget::App((id - APP_MENU_ID_BASE) as usize)
+        }
+        _ => CommandTarget::Unknown,
+    }
+}
+
+fn app_command_id(index: usize) -> Option<u32> {
+    u32::try_from(index)
+        .ok()
+        .and_then(|index| APP_MENU_ID_BASE.checked_add(index))
+        .filter(|id| *id <= APP_MENU_ID_MAX)
+}
+
+/// Menu text for a plain label: `&` would start a mnemonic.
+fn escape_mnemonics(label: &str) -> String {
+    label.replace('&', "&&")
+}
+
+fn to_wide(text: &str) -> Vec<u16> {
+    text.encode_utf16().chain(Some(0)).collect()
+}
+
+/// A popup menu with the application entries (ids from [`app_command_id`]).
+fn create_app_menu(items: &[AppMenuItem]) -> windows::core::Result<HMENU> {
+    let menu = unsafe { CreatePopupMenu()? };
+    for (index, item) in items.iter().enumerate() {
+        let result = match item {
+            AppMenuItem::Separator => unsafe {
+                AppendMenuW(menu, MF_SEPARATOR, 0, PCWSTR::null())
+            },
+            AppMenuItem::Command { label, enabled } => {
+                let Some(id) = app_command_id(index) else {
+                    break;
+                };
+                let text = to_wide(&escape_mnemonics(label));
+                let flags = if *enabled {
+                    MF_STRING
+                } else {
+                    MF_STRING | MF_GRAYED
+                };
+                unsafe { AppendMenuW(menu, flags, id as usize, PCWSTR(text.as_ptr())) }
+            }
+        };
+        if let Err(err) = result {
+            let _ = unsafe { DestroyMenu(menu) };
+            return Err(err);
+        }
+    }
+    Ok(menu)
+}
+
+/// Inserts the application entries as a submenu at the top of `root`,
+/// followed by a separator. Returns the submenu, owned by `root` from then
+/// on (destroyed with it).
+fn insert_app_submenu(root: HMENU, app: AppSubmenu<'_>) -> windows::core::Result<HMENU> {
+    let submenu = create_app_menu(app.items)?;
+    let mut text = to_wide(&escape_mnemonics(app.label));
+    let info = MENUITEMINFOW {
+        cbSize: size_of::<MENUITEMINFOW>() as u32,
+        fMask: MIIM_FTYPE | MIIM_STRING | MIIM_SUBMENU,
+        fType: MFT_STRING,
+        hSubMenu: submenu,
+        dwTypeData: PWSTR(text.as_mut_ptr()),
+        ..Default::default()
+    };
+    if let Err(err) = unsafe { InsertMenuItemW(root, 0, true, &info) } {
+        let _ = unsafe { DestroyMenu(submenu) };
+        return Err(err);
+    }
+    if unsafe { GetMenuItemCount(Some(root)) } > 1 {
+        let separator = MENUITEMINFOW {
+            cbSize: size_of::<MENUITEMINFOW>() as u32,
+            fMask: MIIM_FTYPE,
+            fType: MFT_SEPARATOR,
+            ..Default::default()
+        };
+        let _ = unsafe { InsertMenuItemW(root, 1, true, &separator) };
+    }
+    Ok(submenu)
+}
+
+/// Where a native menu opens: `point` (screen coordinates) or the cursor.
+fn menu_position(point: Option<(i32, i32)>) -> windows::core::Result<POINT> {
+    match point {
+        Some((x, y)) => Ok(POINT { x, y }),
+        None => {
+            let mut point = POINT::default();
+            unsafe { GetCursorPos(&mut point)? };
+            Ok(point)
+        }
+    }
+}
+
+/// Shows only the application entries as a native menu (for when no shell
+/// menu can be built). Returns the index of the picked entry.
+pub fn show_app_menu(
+    hwnd: HWND,
+    point: Option<(i32, i32)>,
+    items: &[AppMenuItem],
+) -> windows::core::Result<Option<usize>> {
+    // A modal native menu at the real cursor would hijack the user's session.
+    if items.is_empty() || crate::core::probe_active() {
+        return Ok(None);
+    }
+    let point = menu_position(point)?;
+    let menu = create_app_menu(items)?;
+    let command = unsafe {
+        TrackPopupMenuEx(
+            menu,
+            (TPM_RETURNCMD | TPM_RIGHTBUTTON).0,
+            point.x,
+            point.y,
+            hwnd,
+            None,
+        )
+    };
+    let _ = unsafe { DestroyMenu(menu) };
+    Ok(match command_target(command.0 as u32) {
+        CommandTarget::App(index) => Some(index),
+        _ => None,
+    })
+}
+
+// ---------------------------------------------------------------------------
 // Shell context menu
 // ---------------------------------------------------------------------------
 
-/// Accumulated icon conversion work (diagnostics only).
-#[derive(Clone, Copy, Default)]
-struct IconLoadStats {
-    converted: u32,
-    failed: u32,
-    elapsed: Duration,
-}
-
+/// A shell context menu for some files or folders of one folder. Build a new
+/// one for every showing: shell extensions may append their items again to a
+/// reused HMENU.
 pub struct ShellContextMenu {
     context_menu: IContextMenu,
     handler: MenuMsgHandler,
     menu: HMENU,
-    nodes: Vec<ShellMenuNode>,
     id_base: u32,
     full_pidls: Vec<*mut ITEMIDLIST>,
     parent_pidl: *mut ITEMIDLIST,
-    /// [`hidden_entries_version`] the node tree was filtered with.
-    hidden_version: u64,
+    /// The folder containing the items (working directory of commands).
+    directory: PathBuf,
     kind: ShellMenuKind,
-    /// Submenus removed by the native mode's pruning (destroyed on drop).
+    /// Submenus removed by the pruning (destroyed on drop).
     detached_submenus: RefCell<Vec<HMENU>>,
-    icon_stats: Cell<IconLoadStats>,
 }
 
 /// How a [`ShellContextMenu`] is built.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum ShellMenuKind {
-    /// `CMF_NORMAL`, hidden entries removed, node tree read for the egui
-    /// menu and the entries recorded for the settings page.
+    /// `CMF_NORMAL`, hidden entries removed and the entries recorded for the
+    /// settings page.
     Filtered,
     /// `CMF_NORMAL | CMF_EXTENDEDVERBS` (Explorer's Shift+right-click menu),
-    /// unfiltered and only shown natively: no node tree, nothing recorded
-    /// (extended-only verbs would otherwise flood the settings list).
+    /// unfiltered and nothing recorded (extended-only verbs would otherwise
+    /// flood the settings list).
     Standard,
 }
 
@@ -789,17 +918,14 @@ impl ShellMenuKind {
 }
 
 impl ShellContextMenu {
-    /// The shell menu for Eden's egui context menu: hidden entries removed,
-    /// its entries listed on the settings page.
+    /// The normal right-click menu: hidden entries removed, its entries
+    /// listed on the settings page.
     pub fn for_paths(paths: &[PathBuf], hwnd: HWND) -> windows::core::Result<Self> {
         Self::build(paths, hwnd, ShellMenuKind::Filtered)
     }
 
     /// The complete Windows menu including the extended verbs, as Explorer
-    /// shows it on Shift+right-click. Nothing is hidden. Only for
-    /// [`Self::show_native`]: the egui node tree is not read ([`Self::nodes`]
-    /// is empty). Build a new one for every showing; shell extensions may
-    /// append their items again to a reused HMENU.
+    /// shows it on Shift+right-click. Nothing is hidden or recorded.
     pub fn standard_for_paths(paths: &[PathBuf], hwnd: HWND) -> windows::core::Result<Self> {
         Self::build(paths, hwnd, ShellMenuKind::Standard)
     }
@@ -835,14 +961,12 @@ impl ShellContextMenu {
             context_menu,
             handler,
             menu: HMENU::default(),
-            nodes: Vec::new(),
             id_base: CONTEXT_MENU_ID_BASE,
             full_pidls,
             parent_pidl,
-            hidden_version: hidden_entries_version(),
+            directory: parent,
             kind,
             detached_submenus: RefCell::new(Vec::new()),
-            icon_stats: Cell::new(IconLoadStats::default()),
         };
 
         this.menu = unsafe { CreatePopupMenu()? };
@@ -859,231 +983,53 @@ impl ShellContextMenu {
         }
         let queried = started.elapsed();
 
-        if kind == ShellMenuKind::Standard {
-            debug_log(format_args!(
-                "standard (extended verbs): {} items in {:.2} ms (create {:.2} ms, QueryContextMenu {:.2} ms)",
-                unsafe { GetMenuItemCount(Some(this.menu)) },
-                started.elapsed().as_secs_f64() * 1000.0,
-                created.as_secs_f64() * 1000.0,
-                (queried - created).as_secs_f64() * 1000.0,
-            ));
-            return Ok(this);
-        }
-
-        let mut stats = CollectStats::default();
-        let level = LevelContext {
-            context_menu: Some(&this.context_menu),
-            id_base: this.id_base,
-            parents: &[],
-        };
-        let (nodes, seen) = collect_level(this.menu, &level, &mut stats);
-        this.nodes = nodes;
-        record_seen_root(seen);
         debug_log(format_args!(
-            "root: {} nodes in {:.2} ms (create {:.2} ms, QueryContextMenu {:.2} ms, collect {:.2} ms){}",
-            this.nodes.len(),
+            "build {kind:?}: {} items in {:.2} ms (create {:.2} ms, QueryContextMenu {:.2} ms)",
+            unsafe { GetMenuItemCount(Some(this.menu)) },
             started.elapsed().as_secs_f64() * 1000.0,
             created.as_secs_f64() * 1000.0,
             (queried - created).as_secs_f64() * 1000.0,
-            (started.elapsed() - queried).as_secs_f64() * 1000.0,
-            stats,
         ));
-
         Ok(this)
     }
 
-    /// Top-level entries of the shell menu.
-    pub fn nodes(&self) -> &[ShellMenuNode] {
-        &self.nodes
-    }
-
-    /// The [`hidden_entries_version`] this menu was built with; a different
-    /// current version means the menu must be rebuilt.
-    pub fn hidden_version(&self) -> u64 {
-        self.hidden_version
-    }
-
-    /// Children of `submenu`, populated on first use: sends
-    /// `WM_INITMENUPOPUP` to the shell menu once (as a native menu host
-    /// would) and reads the HMENU. Later calls return the cached children and
-    /// only re-read the HMENU when its item count changed (asynchronously
-    /// filled submenus), so calling this every frame is cheap.
-    pub fn submenu_children(&self, submenu: &ShellSubmenu) -> Rc<Vec<ShellMenuNode>> {
-        let started = Instant::now();
-        let mut init_result = None;
-        if submenu.initialized_at.get().is_none() {
-            // MAKELPARAM(index, FALSE): not the window menu.
-            let lparam = LPARAM((submenu.index_in_parent & 0xFFFF) as isize);
-            let handled = self
-                .handler
-                .handle(WM_INITMENUPOPUP, WPARAM(submenu.hmenu.0 as usize), lparam)
-                .is_some();
-            let _ = submenu.initialized_at.set(Instant::now());
-            init_result = Some((handled, started.elapsed()));
-        }
-
-        let count = submenu.item_count();
-        if let Some((cached_count, children)) = &*submenu.children.borrow()
-            && *cached_count == count
-        {
-            return Rc::clone(children);
-        }
-
-        let mut stats = CollectStats::default();
-        let level = LevelContext {
-            context_menu: Some(&self.context_menu),
-            id_base: self.id_base,
-            parents: &submenu.path,
-        };
-        let (children, seen) = collect_level(submenu.hmenu, &level, &mut stats);
-        let children = Rc::new(children);
-        record_seen_children(&submenu.key, seen);
-        *submenu.children.borrow_mut() = Some((count, Rc::clone(&children)));
-
-        let init = match init_result {
-            Some((handled, elapsed)) => format!(
-                "WM_INITMENUPOPUP {} {:.2} ms",
-                if handled { "handled" } else { "unhandled" },
-                elapsed.as_secs_f64() * 1000.0
-            ),
-            None => format!(
-                "re-read after async change, {:.0} ms after init",
-                submenu
-                    .initialized_at
-                    .get()
-                    .map_or(0.0, |at| at.elapsed().as_secs_f64() * 1000.0)
-            ),
-        };
-        debug_log(format_args!(
-            "submenu '{}': {} nodes in {:.2} ms ({init}){}",
-            submenu.label,
-            children.len(),
-            started.elapsed().as_secs_f64() * 1000.0,
-            stats,
-        ));
-        children
-    }
-
-    /// The icon of an entry as a texture, converted from the shell's bitmap
-    /// (or rendered offscreen for owner-drawn icons) on first use and cached
-    /// with the menu.
-    pub fn icon_texture(
+    /// Runs a shell command picked in this menu.
+    pub fn invoke(
         &self,
-        ctx: &egui::Context,
-        icon: &MenuIcon,
-    ) -> Option<egui::TextureHandle> {
-        icon.texture
-            .get_or_init(|| {
-                if matches!(icon.source, IconSource::None) {
-                    return None;
-                }
-                let started = Instant::now();
-                let image = match icon.source {
-                    IconSource::None => None,
-                    IconSource::Bitmap(bitmap) => bitmap_to_image(bitmap),
-                    IconSource::Callback {
-                        hmenu,
-                        id,
-                        item_data,
-                    } => self.render_owner_drawn(hmenu, id, item_data, false, ctx),
-                    IconSource::OwnerDraw {
-                        hmenu,
-                        id,
-                        item_data,
-                    } => self.render_owner_drawn(hmenu, id, item_data, true, ctx),
-                };
-                let texture = image.map(|image| {
-                    ctx.load_texture("shell_menu_icon", image, egui::TextureOptions::LINEAR)
-                });
-                let mut stats = self.icon_stats.get();
-                if texture.is_some() {
-                    stats.converted += 1;
-                } else {
-                    stats.failed += 1;
-                }
-                stats.elapsed += started.elapsed();
-                self.icon_stats.set(stats);
-                texture
-            })
-            .clone()
-    }
-
-    /// Logs (debug/probe builds) and resets the icon conversion work done
-    /// since the last call.
-    pub fn log_icon_stats(&self, level: &str) {
-        let stats = self.icon_stats.take();
-        if stats.converted + stats.failed > 0 {
-            debug_log(format_args!(
-                "icons '{level}': {} converted, {} failed in {:.2} ms",
-                stats.converted,
-                stats.failed,
-                stats.elapsed.as_secs_f64() * 1000.0
-            ));
+        hwnd: HWND,
+        command: &ShellCommand,
+        point: Option<(i32, i32)>,
+    ) -> windows::core::Result<()> {
+        let offset = command.id.saturating_sub(self.id_base) as usize;
+        let directory: Vec<u16> = self
+            .directory
+            .as_os_str()
+            .encode_wide()
+            .chain(Some(0))
+            .collect();
+        let key_down = |key| unsafe { GetKeyState(i32::from(key)) } < 0;
+        let mut mask = CMIC_MASK_UNICODE;
+        if key_down(VK_SHIFT.0) {
+            mask |= CMIC_MASK_SHIFT_DOWN;
         }
-    }
-
-    /// Renders an owner-drawn icon offscreen through `WM_MEASUREITEM` /
-    /// `WM_DRAWITEM`. The item is drawn on black and on white so the alpha
-    /// channel can be recovered even when the handler draws with plain GDI.
-    fn render_owner_drawn(
-        &self,
-        hmenu: HMENU,
-        id: u32,
-        item_data: usize,
-        crop_icon: bool,
-        ctx: &egui::Context,
-    ) -> Option<egui::ColorImage> {
-        let icon_px = (MENU_ICON_SIZE * ctx.pixels_per_point()).round().max(1.0) as i32;
-        let mut measure = MEASUREITEMSTRUCT {
-            CtlType: ODT_MENU,
-            CtlID: 0,
-            itemID: id,
-            itemWidth: 0,
-            itemHeight: 0,
-            itemData: item_data,
-        };
-        self.handler.handle(
-            WM_MEASUREITEM,
-            WPARAM(0),
-            LPARAM(&mut measure as *mut MEASUREITEMSTRUCT as isize),
-        )?;
-        let mut width = measure.itemWidth as i32;
-        let mut height = measure.itemHeight as i32;
-        if width <= 0 || height <= 0 {
-            if crop_icon {
-                return None;
-            }
-            width = icon_px;
-            height = icon_px;
+        if key_down(VK_CONTROL.0) {
+            mask |= CMIC_MASK_CONTROL_DOWN;
         }
-        let width = width.clamp(1, 1024);
-        let height = height.clamp(1, 256);
-
-        let on_black = draw_item_offscreen(&self.handler, hmenu, id, item_data, width, height, 0)?;
-        let on_white =
-            draw_item_offscreen(&self.handler, hmenu, id, item_data, width, height, 0xFF)?;
-        let mut rgba = composite_black_white(&on_black, &on_white);
-        let (mut w, mut h) = (width as usize, height as usize);
-        if crop_icon {
-            (rgba, w, h) = crop_owner_drawn_icon(&rgba, w, h)?;
-        }
-        if rgba.chunks_exact(4).all(|px| px[3] == 0) {
-            return None;
-        }
-        Some(egui::ColorImage::from_rgba_unmultiplied([w, h], &rgba))
-    }
-
-    pub fn invoke(&self, hwnd: HWND, id: u32) -> windows::core::Result<()> {
-        let verb_offset = id.saturating_sub(self.id_base) as usize;
-        let info = CMINVOKECOMMANDINFOEX {
+        let mut info = CMINVOKECOMMANDINFOEX {
             cbSize: size_of::<CMINVOKECOMMANDINFOEX>() as u32,
-            fMask: 0,
             hwnd,
-            lpVerb: PCSTR(verb_offset as *const u8),
-            lpVerbW: PCWSTR::null(),
-            nShow: 1,
+            // MAKEINTRESOURCE(offset) in both the ANSI and the wide field.
+            lpVerb: PCSTR(offset as *const u8),
+            lpVerbW: PCWSTR(offset as *const u16),
+            lpDirectoryW: PCWSTR(directory.as_ptr()),
+            nShow: 1, // SW_SHOWNORMAL
             ..Default::default()
         };
+        if let Some((x, y)) = point {
+            mask |= CMIC_MASK_PTINVOKE;
+            info.ptInvoke = POINT { x, y };
+        }
+        info.fMask = mask;
 
         unsafe {
             self.context_menu
@@ -1091,8 +1037,10 @@ impl ShellContextMenu {
         }
     }
 
-    /// Displays the complete shell-provided menu at the current pointer
-    /// position and invokes the command selected by the user.
+    /// Displays the shell menu at `point` (screen coordinates; the current
+    /// cursor position when `None`), with `app` as a submenu at the top, and
+    /// returns what the user picked. Shell commands are not run here (see
+    /// [`NativeMenuChoice::Shell`]).
     ///
     /// While the menu is tracked, the owner window's procedure forwards menu
     /// messages to this menu (see [`forward_native_menu_message`]), so lazily
@@ -1101,18 +1049,24 @@ impl ShellContextMenu {
     /// before showing it and from submenus when the shell has populated them;
     /// a [`Self::standard_for_paths`] menu is shown complete.
     ///
-    /// Show a menu at most once (see [`Self::standard_for_paths`]).
-    pub fn show_native(&self, hwnd: HWND) -> windows::core::Result<()> {
-        // A modal native menu at the real cursor would hijack the user's session.
-        if crate::core::probe_active() {
-            return Ok(());
-        }
-        let mut point = windows::Win32::Foundation::POINT::default();
-        unsafe {
-            windows::Win32::UI::WindowsAndMessaging::GetCursorPos(&mut point)?;
-        }
+    /// Show a menu at most once.
+    pub fn show_native(
+        &self,
+        hwnd: HWND,
+        point: Option<(i32, i32)>,
+        app: Option<AppSubmenu<'_>>,
+    ) -> windows::core::Result<NativeMenuChoice> {
+        // A modal native menu at the real cursor would hijack the user's
+        // session; probe runs prepare the menu (for the timings) only.
+        let probe = crate::core::probe_active();
+        let position = if probe {
+            POINT::default()
+        } else {
+            menu_position(point)?
+        };
+        let started = Instant::now();
         // No early return between pruning and handing the detached submenus
-        // over to `self` (destroyed in `Drop`, after `invoke`).
+        // over to `self` (destroyed in `Drop`).
         let pruner = (self.kind == ShellMenuKind::Filtered).then(|| {
             Rc::new(NativePruner::new(
                 self.context_menu.clone(),
@@ -1123,38 +1077,114 @@ impl ShellContextMenu {
         if let Some(pruner) = &pruner {
             pruner.prune(self.menu);
         }
-        let started = Instant::now();
-        let command = {
+        let pruned = started.elapsed();
+        let app_menu = app.filter(|app| !app.items.is_empty()).and_then(|app| {
+            insert_app_submenu(self.menu, app)
+                .inspect_err(|err| eprintln!("Adding the application submenu failed: {err}"))
+                .ok()
+        });
+        if let Some(pruner) = &pruner {
+            pruner.app_menu.set(app_menu);
+            pruner
+                .settled_root_count
+                .set(Some(unsafe { GetMenuItemCount(Some(self.menu)) }));
+        }
+        debug_log(format_args!(
+            "native {:?} menu prepared in {:.2} ms (prune {:.2} ms), {} root items",
+            self.kind,
+            started.elapsed().as_secs_f64() * 1000.0,
+            pruned.as_secs_f64() * 1000.0,
+            unsafe { GetMenuItemCount(Some(self.menu)) },
+        ));
+
+        let tracking = Instant::now();
+        let command = if probe {
+            0
+        } else {
             let _active = ActiveNativeMenuGuard::install(ActiveNativeMenu {
                 handler: self.handler.clone(),
                 pruner: pruner.clone(),
+                app_menu: app_menu.map(|menu| menu.0 as usize),
             });
             unsafe {
                 TrackPopupMenuEx(
                     self.menu,
                     (TPM_RETURNCMD | TPM_RIGHTBUTTON).0,
-                    point.x,
-                    point.y,
+                    position.x,
+                    position.y,
                     hwnd,
                     None,
                 )
             }
+            .0 as u32
         };
         if let Some(pruner) = &pruner {
             self.detached_submenus
                 .borrow_mut()
                 .extend(pruner.detached.borrow_mut().drain(..));
         }
-        let command = command.0 as u32;
         debug_log(format_args!(
             "native {:?} menu closed after {:.0} ms, command {command}",
             self.kind,
-            started.elapsed().as_secs_f64() * 1000.0
+            tracking.elapsed().as_secs_f64() * 1000.0
         ));
-        if command != 0 {
-            self.invoke(hwnd, command)?;
-        }
-        Ok(())
+
+        Ok(match command_target(command) {
+            CommandTarget::Cancelled | CommandTarget::Unknown => NativeMenuChoice::Cancelled,
+            CommandTarget::App(index) => NativeMenuChoice::App(index),
+            CommandTarget::Shell(id) => NativeMenuChoice::Shell(ShellCommand {
+                id,
+                verb: command_verb(&self.context_menu, id - self.id_base),
+            }),
+        })
+    }
+}
+
+/// How long after startup the shell menu handlers are loaded in advance.
+const WARM_UP_DELAY: Duration = Duration::from_secs(1);
+
+/// Loads the shell's context menu handlers in the background: throwaway
+/// menus for a folder and a file, built and dropped on a separate STA thread
+/// shortly after startup. The handler DLLs stay loaded for the process, so
+/// the first file menu on the UI thread no longer pays for loading them
+/// (about 300 ms down to about 80 ms). The first *folder* menu of each parent
+/// folder still costs about 300 ms more than later ones (per-folder work in
+/// the handlers, not DLL loading). Call once at startup.
+pub fn warm_up_in_background() {
+    // Probe runs can measure the cold first open.
+    if crate::core::probe_active() && std::env::var_os("EDEN_PROBE_NO_WARM_UP").is_some() {
+        return;
+    }
+    let Ok(exe) = std::env::current_exe() else {
+        return;
+    };
+    let spawned = std::thread::Builder::new()
+        .name("shell-menu-warm-up".to_string())
+        .spawn(move || {
+            use windows::Win32::System::Com::{
+                COINIT_APARTMENTTHREADED, CoInitializeEx, CoUninitialize,
+            };
+            std::thread::sleep(WARM_UP_DELAY);
+            if unsafe { CoInitializeEx(None, COINIT_APARTMENTTHREADED) }.is_err() {
+                return;
+            }
+            let started = Instant::now();
+            let folder = exe.parent().map(Path::to_path_buf);
+            for path in folder.into_iter().chain(Some(exe)) {
+                if let Err(err) =
+                    ShellContextMenu::build(&[path], HWND::default(), ShellMenuKind::Filtered)
+                {
+                    debug_log(format_args!("warm-up failed: {err}"));
+                }
+            }
+            debug_log(format_args!(
+                "warm-up done in {:.2} ms",
+                started.elapsed().as_secs_f64() * 1000.0
+            ));
+            unsafe { CoUninitialize() };
+        });
+    if let Err(err) = spawned {
+        eprintln!("Shell menu warm-up thread failed to start: {err}");
     }
 }
 
@@ -1162,7 +1192,8 @@ impl Drop for ShellContextMenu {
     fn drop(&mut self) {
         unsafe {
             if !self.menu.is_invalid() {
-                // Destroys every submenu HMENU referenced by the node tree.
+                // Destroys every submenu still attached, the application
+                // submenu included.
                 let _ = DestroyMenu(self.menu);
             }
             for submenu in self.detached_submenus.get_mut().drain(..) {
@@ -1238,23 +1269,9 @@ fn pidl_from_path(path: &Path) -> windows::core::Result<*mut ITEMIDLIST> {
 // Reading HMENUs
 // ---------------------------------------------------------------------------
 
-/// Diagnostics for one collected level.
+/// Diagnostics for one read menu level.
 #[derive(Default)]
 struct CollectStats {
-    /// Owner-drawn items without a text label.
-    owner_draw_skipped: u32,
-    /// Bitmap-only items (`hbmpItem` set, no text).
-    bitmap_skipped: u32,
-    /// Other items without a text label (or without a command id).
-    unlabeled_skipped: u32,
-    /// Hidden by the user.
-    hidden: u32,
-    /// Icon sources of the listed entries.
-    icon_bitmap: u32,
-    icon_callback: u32,
-    icon_owner_draw: u32,
-    icon_system: u32,
-    icon_none: u32,
     /// Entries keyed by their canonical verb, and the time to look them up.
     verbs: u32,
     verb_time: Duration,
@@ -1264,25 +1281,9 @@ impl std::fmt::Display for CollectStats {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(
             f,
-            "; icons: bitmap {}, callback {}, owner-draw {}, system {}, none {}; verbs {} in {:.2} ms",
-            self.icon_bitmap,
-            self.icon_callback,
-            self.icon_owner_draw,
-            self.icon_system,
-            self.icon_none,
+            "verbs {} in {:.2} ms",
             self.verbs,
             self.verb_time.as_secs_f64() * 1000.0,
-        )?;
-        if self.hidden > 0 {
-            write!(f, "; hidden {}", self.hidden)?;
-        }
-        if self.owner_draw_skipped + self.bitmap_skipped + self.unlabeled_skipped == 0 {
-            return Ok(());
-        }
-        write!(
-            f,
-            "; skipped owner-draw {}, bitmap-only {}, unlabeled {}",
-            self.owner_draw_skipped, self.bitmap_skipped, self.unlabeled_skipped
         )
     }
 }
@@ -1335,188 +1336,6 @@ fn read_menu_item(
     Some(MenuItemRead { info, label })
 }
 
-/// Classifies the icon of a menu item.
-fn icon_source(menu: HMENU, info: &MENUITEMINFOW, stats: &mut CollectStats) -> IconSource {
-    if info.fType.contains(MFT_OWNERDRAW) {
-        stats.icon_owner_draw += 1;
-        return IconSource::OwnerDraw {
-            hmenu: menu,
-            id: info.wID,
-            item_data: info.dwItemData,
-        };
-    }
-    match info.hbmpItem.0 as isize {
-        0 => {
-            stats.icon_none += 1;
-            IconSource::None
-        }
-        // HBMMENU_CALLBACK
-        -1 => {
-            stats.icon_callback += 1;
-            IconSource::Callback {
-                hmenu: menu,
-                id: info.wID,
-                item_data: info.dwItemData,
-            }
-        }
-        // HBMMENU_SYSTEM .. HBMMENU_POPUP_MINIMIZE: window-menu glyphs.
-        1..=11 => {
-            stats.icon_system += 1;
-            IconSource::None
-        }
-        _ => {
-            stats.icon_bitmap += 1;
-            IconSource::Bitmap(info.hbmpItem)
-        }
-    }
-}
-
-/// Reads one level of `menu`. Submenus are recorded with their HMENU but
-/// not descended into (see [`ShellContextMenu::submenu_children`]).
-///
-/// Returns the visible nodes (hidden entries removed) and every labeled
-/// entry of the level for the settings page.
-fn collect_level(
-    menu: HMENU,
-    level: &LevelContext<'_>,
-    stats: &mut CollectStats,
-) -> (Vec<ShellMenuNode>, Vec<SeenMenuEntry>) {
-    let count = unsafe { GetMenuItemCount(Some(menu)) };
-    if count <= 0 {
-        return (Vec::new(), Vec::new());
-    }
-
-    // Read every item first; keys need the whole level (duplicate verbs).
-    struct Entry {
-        node: ShellMenuNode,
-        /// `(command id, label)` for labeled entries, `None` for separators.
-        key_input: Option<(Option<u32>, String)>,
-    }
-    let mut entries: Vec<Entry> = Vec::with_capacity(count as usize);
-    let mut buffer: Vec<u16> = Vec::new();
-    for index in 0..count as u32 {
-        let mask = MIIM_ID | MIIM_STATE | MIIM_BITMAP | MIIM_DATA;
-        let Some(MenuItemRead { info, label }) = read_menu_item(menu, index, mask, &mut buffer)
-        else {
-            continue;
-        };
-
-        if info.fType.contains(MFT_SEPARATOR) {
-            entries.push(Entry {
-                node: ShellMenuNode::Separator,
-                key_input: None,
-            });
-            continue;
-        }
-
-        // MFS_DISABLED == MFS_GRAYED == MF_GRAYED | MF_DISABLED; either bit
-        // disables the item.
-        let disabled = info.fState.0 & MFS_DISABLED.0 != 0;
-
-        if label.is_empty() {
-            if info.fType.contains(MFT_OWNERDRAW) {
-                stats.owner_draw_skipped += 1;
-            } else if !info.hbmpItem.is_invalid() {
-                stats.bitmap_skipped += 1;
-            } else {
-                stats.unlabeled_skipped += 1;
-            }
-            continue;
-        }
-
-        if !info.hSubMenu.is_invalid() {
-            let mut path = level.parents.to_vec();
-            path.push(label.clone());
-            entries.push(Entry {
-                node: ShellMenuNode::Submenu(ShellSubmenu {
-                    label: label.clone(),
-                    disabled,
-                    icon: MenuIcon::new(icon_source(menu, &info, stats)),
-                    key: String::new(),
-                    path,
-                    hmenu: info.hSubMenu,
-                    index_in_parent: index,
-                    initialized_at: OnceCell::new(),
-                    children: RefCell::new(None),
-                }),
-                key_input: Some((None, label)),
-            });
-            continue;
-        }
-
-        if info.wID == 0 {
-            stats.unlabeled_skipped += 1;
-            continue;
-        }
-
-        entries.push(Entry {
-            node: ShellMenuNode::Command {
-                id: info.wID,
-                label: label.clone(),
-                disabled,
-                is_default: info.fState.contains(MFS_DEFAULT),
-                icon: MenuIcon::new(icon_source(menu, &info, stats)),
-            },
-            key_input: Some((Some(info.wID), label)),
-        });
-    }
-
-    let key_input: Vec<(Option<u32>, &str)> = entries
-        .iter()
-        .filter_map(|entry| entry.key_input.as_ref())
-        .map(|(id, label)| (*id, label.as_str()))
-        .collect();
-    let mut keys = level_keys(level, &key_input, stats).into_iter();
-
-    let hidden = hidden_set();
-    let mut seen = Vec::new();
-    let mut nodes = Vec::with_capacity(entries.len());
-    for entry in entries {
-        let Some((_, label)) = &entry.key_input else {
-            nodes.push(entry.node);
-            continue;
-        };
-        let key = keys.next().unwrap_or_default();
-        seen.push(SeenMenuEntry {
-            key: key.clone(),
-            label: label.clone(),
-            path_label: path_label(level.parents, label),
-            depth: level.parents.len(),
-            is_submenu: matches!(entry.node, ShellMenuNode::Submenu(_)),
-            parent: String::new(),
-        });
-        if hidden.contains(&key) {
-            stats.hidden += 1;
-            continue;
-        }
-        let mut node = entry.node;
-        if let ShellMenuNode::Submenu(submenu) = &mut node {
-            submenu.key = key;
-        }
-        nodes.push(node);
-    }
-
-    normalize_separators(&mut nodes);
-    (nodes, seen)
-}
-
-/// Drops leading/trailing separators and collapses runs of separators
-/// (skipped items can leave adjacent separators behind).
-fn normalize_separators(nodes: &mut Vec<ShellMenuNode>) {
-    let mut previous_was_separator = true; // drops leading separators
-    nodes.retain(|node| {
-        let is_separator = matches!(node, ShellMenuNode::Separator);
-        let keep = !(is_separator && previous_was_separator);
-        if keep {
-            previous_was_separator = is_separator;
-        }
-        keep
-    });
-    if matches!(nodes.last(), Some(ShellMenuNode::Separator)) {
-        nodes.pop();
-    }
-}
-
 /// Turns a Win32 menu label into display text: removes mnemonic markers
 /// (`&x` → `x`, `&&` → `&`, and the CJK-style `(&X)` suffix entirely) and
 /// cuts the accelerator text after a tab.
@@ -1551,236 +1370,6 @@ fn sanitize_label(raw: &str) -> String {
     out.trim().to_string()
 }
 
-// ---------------------------------------------------------------------------
-// Bitmaps
-// ---------------------------------------------------------------------------
-
-/// Converts a menu item bitmap (usually a 32bpp premultiplied DIB section) to
-/// an egui image.
-fn bitmap_to_image(bitmap: HBITMAP) -> Option<egui::ColorImage> {
-    unsafe {
-        let mut bmp = BITMAP::default();
-        if GetObjectW(
-            HGDIOBJ(bitmap.0),
-            size_of::<BITMAP>() as i32,
-            Some(&mut bmp as *mut BITMAP as *mut _),
-        ) == 0
-        {
-            return None;
-        }
-        let width = bmp.bmWidth;
-        let height = bmp.bmHeight.abs();
-        if !(1..=256).contains(&width) || !(1..=256).contains(&height) {
-            return None;
-        }
-
-        // Negative height: rows come back top-down whatever the source
-        // orientation is.
-        let mut info = BITMAPINFO::default();
-        info.bmiHeader = BITMAPINFOHEADER {
-            biSize: size_of::<BITMAPINFOHEADER>() as u32,
-            biWidth: width,
-            biHeight: -height,
-            biPlanes: 1,
-            biBitCount: 32,
-            biCompression: BI_RGB.0,
-            ..Default::default()
-        };
-        let mut pixels = vec![0u8; width as usize * height as usize * 4];
-        let dc = GetDC(None);
-        let lines = GetDIBits(
-            dc,
-            bitmap,
-            0,
-            height as u32,
-            Some(pixels.as_mut_ptr().cast()),
-            &mut info,
-            DIB_RGB_COLORS,
-        );
-        ReleaseDC(None, dc);
-        if lines == 0 {
-            return None;
-        }
-
-        bgra_to_straight_rgba(&mut pixels, bmp.bmBitsPixel == 32);
-        Some(egui::ColorImage::from_rgba_unmultiplied(
-            [width as usize, height as usize],
-            &pixels,
-        ))
-    }
-}
-
-/// BGRA → RGBA in place. Bitmaps without alpha (or with an all-zero alpha
-/// channel) are opaque; premultiplied pixels are converted to straight alpha.
-fn bgra_to_straight_rgba(pixels: &mut [u8], has_alpha_channel: bool) {
-    let alpha_present = has_alpha_channel && pixels.chunks_exact(4).any(|px| px[3] != 0);
-    // Premultiplied data never has a color channel above alpha.
-    let premultiplied = alpha_present
-        && pixels
-            .chunks_exact(4)
-            .all(|px| px[0] <= px[3] && px[1] <= px[3] && px[2] <= px[3]);
-    for px in pixels.chunks_exact_mut(4) {
-        px.swap(0, 2);
-        if !alpha_present {
-            px[3] = 255;
-        } else if premultiplied && px[3] > 0 && px[3] < 255 {
-            let alpha = px[3] as u32;
-            for channel in &mut px[..3] {
-                *channel = ((*channel as u32 * 255 + alpha / 2) / alpha).min(255) as u8;
-            }
-        }
-    }
-}
-
-/// Sends `WM_DRAWITEM` for a menu item into a 32bpp DIB filled with
-/// `background` (all four channels) and returns the BGRA pixels.
-fn draw_item_offscreen(
-    handler: &MenuMsgHandler,
-    hmenu: HMENU,
-    id: u32,
-    item_data: usize,
-    width: i32,
-    height: i32,
-    background: u8,
-) -> Option<Vec<u8>> {
-    unsafe {
-        let dc = CreateCompatibleDC(None);
-        if dc.is_invalid() {
-            return None;
-        }
-        let mut info = BITMAPINFO::default();
-        info.bmiHeader = BITMAPINFOHEADER {
-            biSize: size_of::<BITMAPINFOHEADER>() as u32,
-            biWidth: width,
-            biHeight: -height,
-            biPlanes: 1,
-            biBitCount: 32,
-            biCompression: BI_RGB.0,
-            ..Default::default()
-        };
-        let mut bits: *mut std::ffi::c_void = std::ptr::null_mut();
-        let dib = match CreateDIBSection(Some(dc), &info, DIB_RGB_COLORS, &mut bits, None, 0) {
-            Ok(dib) if !bits.is_null() => dib,
-            Ok(dib) => {
-                let _ = DeleteObject(dib.into());
-                let _ = DeleteDC(dc);
-                return None;
-            }
-            Err(_) => {
-                let _ = DeleteDC(dc);
-                return None;
-            }
-        };
-        let previous = SelectObject(dc, dib.into());
-        let len = width as usize * height as usize * 4;
-        std::ptr::write_bytes(bits.cast::<u8>(), background, len);
-
-        let draw = DRAWITEMSTRUCT {
-            CtlType: ODT_MENU,
-            CtlID: 0,
-            itemID: id,
-            itemAction: ODA_DRAWENTIRE,
-            itemState: ODS_FLAGS(0),
-            hwndItem: HWND(hmenu.0),
-            hDC: dc,
-            rcItem: RECT {
-                left: 0,
-                top: 0,
-                right: width,
-                bottom: height,
-            },
-            itemData: item_data,
-        };
-        let handled = handler
-            .handle(
-                WM_DRAWITEM,
-                WPARAM(0),
-                LPARAM(&draw as *const DRAWITEMSTRUCT as isize),
-            )
-            .is_some();
-        let _ = GdiFlush();
-        let pixels = handled.then(|| std::slice::from_raw_parts(bits.cast::<u8>(), len).to_vec());
-
-        SelectObject(dc, previous);
-        let _ = DeleteObject(dib.into());
-        let _ = DeleteDC(dc);
-        pixels
-    }
-}
-
-/// Recovers straight RGBA from the same drawing on black and on white
-/// (BGRA): `alpha = 1 - (white - black)`, `color = black / alpha`.
-fn composite_black_white(on_black: &[u8], on_white: &[u8]) -> Vec<u8> {
-    let mut rgba = Vec::with_capacity(on_black.len());
-    for (black, white) in on_black.chunks_exact(4).zip(on_white.chunks_exact(4)) {
-        let diff: u32 = (0..3)
-            .map(|c| white[c].saturating_sub(black[c]) as u32)
-            .sum::<u32>();
-        let alpha = 255 - (diff / 3).min(255);
-        let straight = |c: u8| {
-            if alpha == 0 {
-                0
-            } else {
-                ((c as u32 * 255 + alpha / 2) / alpha).min(255) as u8
-            }
-        };
-        rgba.extend_from_slice(&[
-            straight(black[2]),
-            straight(black[1]),
-            straight(black[0]),
-            alpha as u8,
-        ]);
-    }
-    rgba
-}
-
-/// Crops the icon from a fully owner-drawn item: within the left square of
-/// the item, the bounding box of the pixels that differ from the item
-/// background (top-left pixel), made square. Background pixels become
-/// transparent.
-fn crop_owner_drawn_icon(
-    rgba: &[u8],
-    width: usize,
-    height: usize,
-) -> Option<(Vec<u8>, usize, usize)> {
-    let square = height.min(width);
-    let background = &rgba[..4];
-    let pixel = |x: usize, y: usize| &rgba[(y * width + x) * 4..(y * width + x) * 4 + 4];
-    let (mut min_x, mut min_y, mut max_x, mut max_y) = (usize::MAX, usize::MAX, 0, 0);
-    for y in 0..height {
-        for x in 0..square {
-            let px = pixel(x, y);
-            if px[3] != 0 && px != background {
-                min_x = min_x.min(x);
-                min_y = min_y.min(y);
-                max_x = max_x.max(x);
-                max_y = max_y.max(y);
-            }
-        }
-    }
-    if min_x == usize::MAX {
-        return None;
-    }
-    let side = (max_x - min_x + 1).max(max_y - min_y + 1);
-    let x0 = min_x.min(width.saturating_sub(side));
-    let y0 = (min_y + max_y + 1).saturating_sub(side) / 2;
-    let y0 = y0.min(height.saturating_sub(side));
-    let side = side.min(width - x0).min(height - y0);
-
-    let mut out = Vec::with_capacity(side * side * 4);
-    for y in y0..y0 + side {
-        for x in x0..x0 + side {
-            let px = pixel(x, y);
-            if px == background {
-                out.extend_from_slice(&[0, 0, 0, 0]);
-            } else {
-                out.extend_from_slice(px);
-            }
-        }
-    }
-    Some((out, side, side))
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1801,38 +1390,6 @@ mod tests {
         assert_eq!(sanitize_label("Properties..."), "Properties...");
         assert_eq!(sanitize_label(""), "");
         assert_eq!(sanitize_label("  &Pad  "), "Pad");
-    }
-
-    #[test]
-    fn separators_are_normalized() {
-        let cmd = |id| ShellMenuNode::Command {
-            id,
-            label: String::new(),
-            disabled: false,
-            is_default: false,
-            icon: MenuIcon::none(),
-        };
-        let mut nodes = vec![
-            ShellMenuNode::Separator,
-            cmd(1),
-            ShellMenuNode::Separator,
-            ShellMenuNode::Separator,
-            cmd(2),
-            ShellMenuNode::Separator,
-        ];
-        normalize_separators(&mut nodes);
-        let shape: Vec<Option<u32>> = nodes
-            .iter()
-            .map(|n| match n {
-                ShellMenuNode::Command { id, .. } => Some(*id),
-                _ => None,
-            })
-            .collect();
-        assert_eq!(shape, vec![Some(1), None, Some(2)]);
-
-        let mut only_separators = vec![ShellMenuNode::Separator, ShellMenuNode::Separator];
-        normalize_separators(&mut only_separators);
-        assert!(only_separators.is_empty());
     }
 
     #[test]
@@ -1875,24 +1432,6 @@ mod tests {
         assert_eq!(parse_verb(&wide("  ")), None);
         // "open" written as ANSI into the wide buffer.
         assert_eq!(parse_verb(&[0x706F, 0x6E65, 0]), None);
-    }
-
-    #[test]
-    fn bitmap_alpha_handling() {
-        // Premultiplied half-transparent white -> straight white.
-        let mut px = vec![128, 128, 128, 128];
-        bgra_to_straight_rgba(&mut px, true);
-        assert_eq!(px, vec![255, 255, 255, 128]);
-
-        // All-zero alpha: opaque, BGR swapped.
-        let mut px = vec![10, 20, 30, 0, 40, 50, 60, 0];
-        bgra_to_straight_rgba(&mut px, true);
-        assert_eq!(px, vec![30, 20, 10, 255, 60, 50, 40, 255]);
-
-        // Straight (non-premultiplied) data is kept.
-        let mut px = vec![200, 0, 0, 100];
-        bgra_to_straight_rgba(&mut px, true);
-        assert_eq!(px, vec![0, 0, 200, 100]);
     }
 
     /// Builds a native menu from `(label, kind)`; kind: 'c' command,
@@ -1984,13 +1523,171 @@ mod tests {
     }
 
     #[test]
-    fn black_white_compositing() {
-        // Opaque red, transparent, 50% black.
-        let black = [0, 0, 255, 0, 0, 0, 0, 0, 0, 0, 0, 0];
-        let white = [0, 0, 255, 255, 255, 255, 255, 255, 128, 128, 128, 255];
-        let rgba = composite_black_white(&black, &white);
-        assert_eq!(&rgba[..4], &[255, 0, 0, 255]);
-        assert_eq!(rgba[7], 0);
-        assert_eq!(&rgba[8..12], &[0, 0, 0, 127]);
+    fn command_id_ranges_do_not_overlap() {
+        // 0 is "cancelled"; the shell range and the application range are
+        // disjoint and fit the 16-bit menu ids of WM_COMMAND.
+        const {
+            assert!(CONTEXT_MENU_ID_BASE > 0);
+            assert!(CONTEXT_MENU_ID_BASE <= CONTEXT_MENU_ID_MAX);
+            assert!(CONTEXT_MENU_ID_MAX < APP_MENU_ID_BASE);
+            assert!(APP_MENU_ID_BASE <= APP_MENU_ID_MAX);
+            assert!(APP_MENU_ID_MAX <= 0xFFFF);
+        }
+
+        assert_eq!(command_target(0), CommandTarget::Cancelled);
+        assert_eq!(
+            command_target(CONTEXT_MENU_ID_BASE),
+            CommandTarget::Shell(CONTEXT_MENU_ID_BASE)
+        );
+        assert_eq!(
+            command_target(CONTEXT_MENU_ID_MAX),
+            CommandTarget::Shell(CONTEXT_MENU_ID_MAX)
+        );
+        assert_eq!(command_target(APP_MENU_ID_BASE), CommandTarget::App(0));
+        assert_eq!(command_target(APP_MENU_ID_MAX + 1), CommandTarget::Unknown);
+
+        for index in [0, 1, 10, (APP_MENU_ID_MAX - APP_MENU_ID_BASE) as usize] {
+            let id = app_command_id(index).unwrap();
+            assert_eq!(command_target(id), CommandTarget::App(index));
+        }
+        assert_eq!(
+            app_command_id((APP_MENU_ID_MAX - APP_MENU_ID_BASE) as usize + 1),
+            None
+        );
+    }
+
+    #[test]
+    fn app_submenu_is_inserted_on_top() {
+        use windows::Win32::UI::WindowsAndMessaging::{GetMenuItemID, GetMenuState, MF_GRAYED};
+        let root = native_menu(&[("Open", 'c'), ("Properties", 'c')]);
+        let items = [
+            AppMenuItem::Command {
+                label: "Copy & paste".to_string(),
+                enabled: true,
+            },
+            AppMenuItem::Separator,
+            AppMenuItem::Command {
+                label: "Paste".to_string(),
+                enabled: false,
+            },
+        ];
+        let app = insert_app_submenu(
+            root,
+            AppSubmenu {
+                label: "EdenExplorer",
+                items: &items,
+            },
+        )
+        .unwrap();
+
+        assert_eq!(
+            native_labels(root),
+            vec!["EdenExplorer", "-", "Open", "Properties"]
+        );
+        assert_eq!(unsafe { GetSubMenu(root, 0) }, app);
+        // `&` is literal text, not a mnemonic.
+        assert_eq!(native_labels(app), vec!["Copy & paste", "-", "Paste"]);
+        unsafe {
+            assert_eq!(GetMenuItemID(app, 0), APP_MENU_ID_BASE);
+            assert_eq!(GetMenuItemID(app, 2), APP_MENU_ID_BASE + 2);
+            assert_eq!(GetMenuState(app, 0, MF_BYPOSITION) & MF_GRAYED.0, 0);
+            assert_ne!(GetMenuState(app, 2, MF_BYPOSITION) & MF_GRAYED.0, 0);
+            // The root owns the application submenu.
+            DestroyMenu(root).unwrap();
+        }
+    }
+
+    #[test]
+    fn native_pruning_records_entries_but_not_the_app_submenu() {
+        let root = native_menu(&[("Open", 'c'), ("Send to", 's'), ("Hide", 'c')]);
+        let send_to = unsafe { GetSubMenu(root, 1) };
+        let hidden: HashSet<String> = ["label:Hide".to_string()].into_iter().collect();
+        let pruner = Rc::new(NativePruner::with_hidden(
+            None,
+            CONTEXT_MENU_ID_BASE,
+            root,
+            hidden,
+        ));
+        let seen_keys = || -> Vec<String> {
+            seen_entries()
+                .into_iter()
+                .map(|entry| format!("{}{}", "  ".repeat(entry.depth), entry.key))
+                .collect()
+        };
+
+        // Root before showing: everything listed, the hidden entry included.
+        pruner.prune(root);
+        assert_eq!(native_labels(root), vec!["Open", "Send to"]);
+        assert_eq!(
+            seen_keys(),
+            vec!["label:Open", "label:Send to", "label:Hide"]
+        );
+
+        let items = [AppMenuItem::Command {
+            label: "Rename".to_string(),
+            enabled: true,
+        }];
+        let app = insert_app_submenu(
+            root,
+            AppSubmenu {
+                label: "EdenExplorer",
+                items: &items,
+            },
+        )
+        .unwrap();
+        pruner.app_menu.set(Some(app));
+        pruner
+            .settled_root_count
+            .set(Some(unsafe { GetMenuItemCount(Some(root)) }));
+
+        let _active = ActiveNativeMenuGuard::install(ActiveNativeMenu {
+            handler: MenuMsgHandler {
+                cm2: None,
+                cm3: None,
+            },
+            pruner: Some(Rc::clone(&pruner)),
+            app_menu: Some(app.0 as usize),
+        });
+        let init_popup = |menu: HMENU| {
+            forward_native_menu_message(WM_INITMENUPOPUP, WPARAM(menu.0 as usize), LPARAM(0))
+        };
+
+        // The root again (as TrackPopupMenuEx does): nothing new.
+        init_popup(root);
+        // A shell submenu opened by the user: its children are recorded.
+        init_popup(send_to);
+        // The application submenu: neither pruned nor recorded.
+        init_popup(app);
+        assert!(!pruner.menus.borrow().contains_key(&(app.0 as usize)));
+        assert_eq!(native_labels(app), vec!["Rename"]);
+        assert_eq!(
+            seen_keys(),
+            vec![
+                "label:Open",
+                "label:Send to",
+                "  label:Send to > child",
+                "label:Hide"
+            ]
+        );
+
+        // A changed root is read again; the hidden entry and the recorded
+        // children stay listed and the application submenu stays out.
+        pruner.settled_root_count.set(None);
+        pruner.prune(root);
+        assert_eq!(
+            native_labels(root),
+            vec!["EdenExplorer", "-", "Open", "Send to"]
+        );
+        assert_eq!(
+            seen_keys(),
+            vec![
+                "label:Open",
+                "label:Send to",
+                "  label:Send to > child",
+                "label:Hide"
+            ]
+        );
+
+        unsafe { DestroyMenu(root).unwrap() };
     }
 }

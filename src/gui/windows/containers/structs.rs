@@ -9,7 +9,6 @@ use crate::gui::utils::{FileOpProgress, SortKey, hsl_to_color32};
 use crate::gui::windows::containers::enums::{
     ItemViewerAction, ItemViewerHeaderColumn, ItemViewerNavAction,
 };
-use crate::gui::windows::shell_context_menu::ShellContextMenu;
 use crate::gui::windows::structs::Navigation;
 use crossbeam_channel::{Receiver, Sender};
 use egui::Color32;
@@ -29,14 +28,32 @@ pub struct ExplorerState {
     pub selection_focus: Option<usize>,
     pub pending_selection_paths: Option<Vec<PathBuf>>, // select after refresh
     pub non_ntfs_popup_path: Option<PathBuf>,
-    pub windows_context_menu_cache: Option<WindowsContextMenuCache>,
+    /// A right-click on an item whose native menu opens on a later frame.
+    pub pending_item_menu: Option<PendingItemMenu>,
     pub navigation_history: HashMap<PathBuf, PathBuf>, // parent_dir -> last_visited_child
     pub navigation_selection: Option<PathBuf>,         // path to select after navigation loads
 }
 
-pub struct WindowsContextMenuCache {
-    pub selection: Vec<PathBuf>,
-    pub menu: ShellContextMenu,
+/// The native context menu of an item, requested by a right-click and opened
+/// a frame or two later, once the selection it acts on has been painted
+/// (the menu blocks the UI thread while it is open).
+pub struct PendingItemMenu {
+    /// The right-clicked item.
+    pub file: PathBuf,
+    pub file_is_dir: bool,
+    /// What the menu acts on: the selection when the item is part of it,
+    /// otherwise the item alone.
+    pub paths: Vec<PathBuf>,
+    /// Shift+right-click: the complete Windows menu with the extended verbs,
+    /// nothing hidden.
+    pub extended: bool,
+    pub paste_enabled: bool,
+    pub is_cut: bool,
+    /// Screen position of the click (physical pixels).
+    pub screen_pos: Option<(i32, i32)>,
+    /// First frame (`cumulative_frame_nr`) on which the menu may open.
+    pub open_at_frame: u64,
+    pub requested_at: std::time::Instant,
 }
 
 #[derive(Clone)]

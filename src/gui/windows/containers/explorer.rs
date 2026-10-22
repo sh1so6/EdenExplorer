@@ -4,6 +4,7 @@ use crate::gui::icons::IconCache;
 use crate::gui::theme::ThemePalette;
 use crate::gui::windows::containers::enums::ItemViewerAction;
 use crate::gui::windows::containers::itemviewer::draw_item_viewer;
+use crate::gui::windows::containers::itemviewer_helper::open_pending_item_menu;
 use crate::gui::windows::containers::itemviewer_navbar::draw_itemviewer_navigation_bar;
 use crate::gui::windows::containers::structs::{
     ItemViewerDisplayMode, ItemViewerNavBarAction, RenameState, TabView, TagsState,
@@ -72,6 +73,14 @@ pub fn draw_tab_content(
     let mut hovered_drop_target_rect: Option<egui::Rect> = None;
     let mut pending_action: Option<ItemViewerAction> = None;
     let mut tabbar_action = None;
+
+    // A native item menu requested by a right-click on an earlier frame. It
+    // blocks until closed, before this view is drawn; the frame's input was
+    // read before the menu opened.
+    let modal_input_blocked =
+        tags_state.picker.is_some() || theme_customizer.open || settings_window.open;
+    let item_menu_action =
+        open_pending_item_menu(ui.ctx(), i18n, view, hwnd, modal_input_blocked);
 
     let font_id = egui::FontId::proportional(palette.text_size);
     let status_height = ui.fonts_mut(|f| f.row_height(&font_id)) + 2.0;
@@ -311,7 +320,9 @@ pub fn draw_tab_content(
 
     ui.spacing_mut().item_spacing.y = old_spacing;
 
-    (tabbar_action, pending_action)
+    // The menu's command wins over anything the view reported on the same
+    // frame (normally nothing: the user was in the menu).
+    (tabbar_action, item_menu_action.or(pending_action))
 }
 
 fn draw_status_counter(

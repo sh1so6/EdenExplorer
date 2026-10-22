@@ -446,17 +446,18 @@ fn draw_view_defaults_tab(
     changed.then_some(SettingsAction::ApplySettings)
 }
 
-/// Lists Eden's own item-menu entries and the Windows shell menu entries
-/// (from the most recently opened context menu, plus every hidden entry)
-/// with a checkbox each; unchecked entries are hidden from the item menu.
-/// Changes are saved immediately.
+/// Lists Eden's own item-menu entries (the "EdenExplorer" submenu) and the
+/// Windows shell menu entries (from the most recently opened context menu and
+/// its opened submenus, plus every hidden entry) with a checkbox each;
+/// unchecked entries are hidden from the item menu (not from the
+/// Shift+right-click menu). Changes are saved immediately.
 fn draw_context_menu_tab(ui: &mut egui::Ui, palette: &ThemePalette, i18n: &I18n) {
     ui.add(
         egui::Label::new(
             RichText::new(format!(
                 "{} {}",
                 regular::INFO,
-                i18n.tr("settings_contextmenu_shift_hint")
+                i18n.tr("settings_contextmenu_menu_hint")
             ))
             .color(palette.text_normal),
         )

@@ -57,7 +57,10 @@ optionally `EDEN_PROBE_DATA_DIR=<dir>`. Without `EDEN_PROBE_SCRIPT` a
   scripted events reach egui, and the window always reports itself as focused.
 - The app never starts actions that would use the real cursor or activate the
   window: native OLE drag-out, title-bar window drag, maximize/restore,
-  minimize and the native shell context menu are disabled.
+  minimize and showing the native file/folder context menu are disabled. A
+  right-click on an item still builds that menu (for its timings, see
+  `probe/context_native_timing.txt`) but never shows it, so its entries,
+  Eden's own included, cannot be clicked.
 
 ## Script format
 
@@ -74,7 +77,7 @@ the factor.
 | `move X Y`                     | Move the pointer.                                                                              |
 | `down [left\|right\|middle]`   | Press a button at the current pointer position.                                                |
 | `up [left\|right\|middle]`     | Release a button.                                                                              |
-| `click X Y [button]`           | Move, press, then release, each on its own frame.                                              |
+| `click X Y [button] [ctrl] [shift] [alt]` | Move, press, then release, each on its own frame, with the given modifiers held.  |
 | `drag X1 Y1 X2 Y2 [steps]`     | Move, press, then `steps` interpolated moves (default 10, one per frame), then release (left button). |
 | `wheel DY`                     | Scroll DY points. Positive scrolls up, negative scrolls down.                                  |
 | `key NAME [ctrl] [shift] [alt]` | Press and release an `egui::Key` (`T`, `Tab`, `Escape`, `F2`, `ArrowDown`, …).                 |
@@ -104,10 +107,10 @@ logged as `ERROR` and skipped. Outputs under `scripts/probe/out/` and
 - Native OLE drag and drop (drag-out to other apps, drops from Explorer)
   cannot be tested. Internal egui drags work.
 - IME composition is not simulated. `text` sends committed text only.
-- Modal OS UI started by a scripted click, such as `rfd` file dialogs or shell
-  verbs from the compatibility context menu, is real and appears on screen.
-  Avoid those flows in scripts. Opening a context menu still asks the shell
-  for its entries, which loads the installed shell extensions as usual.
+- Modal OS UI started by a scripted click, such as `rfd` file dialogs, is real
+  and appears on screen. Avoid those flows in scripts. Right-clicking an item
+  still asks the shell for its menu entries, which loads the installed shell
+  extensions as usual.
 - The clipboard is the real system clipboard. Copy and cut commands in a script
   overwrite it.
 - File operations act on real paths. Point scripts at scratch folders.

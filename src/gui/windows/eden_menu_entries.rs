@@ -1,8 +1,8 @@
 //! Eden's own entries of the item (file/folder) context menu.
 //!
 //! [`EdenMenuEntry::ALL`] is the single source of truth for the entries: the
-//! item menu draws them in this order and the settings page lists them so
-//! each one can be hidden. Hidden keys are persisted with the shell entry
+//! item menu shows them in this order (in its "EdenExplorer" submenu) and the
+//! settings page lists them so each one can be hidden. Hidden keys are persisted with the shell entry
 //! preferences (`context_menu.json`, see [`shell_context_menu`]).
 
 use crate::gui::windows::shell_context_menu;
@@ -81,7 +81,7 @@ impl EdenMenuEntry {
         }
     }
 
-    /// Entries of the same group are drawn together; a separator is drawn
+    /// Entries of the same group are shown together; a separator is shown
     /// between two visible entries of different groups.
     const fn group(self) -> u8 {
         match self {
@@ -100,7 +100,7 @@ impl EdenMenuEntry {
     }
 }
 
-/// One slot of the drawn Eden part of the item menu.
+/// One slot of the Eden part of the item menu.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum EdenMenuSlot {
     Entry(EdenMenuEntry),
@@ -148,6 +148,12 @@ pub fn visible_slots() -> Vec<EdenMenuSlot> {
             }
         }
     })
+}
+
+/// Every entry, hidden or not, in menu order with separators between groups
+/// (the Shift+right-click menu hides nothing).
+pub fn all_slots() -> Vec<EdenMenuSlot> {
+    layout(|_| false)
 }
 
 #[cfg(test)]

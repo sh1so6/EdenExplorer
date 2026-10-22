@@ -360,6 +360,10 @@ impl eframe::App for MainWindow {
                 self.dragdrop = Some(Box::new(
                     crate::gui::windows::dragdrop::WindowsDragDropBackend::new(Some(hwnd)),
                 ));
+
+                // The first item menu would otherwise load the shell
+                // extensions while the user waits.
+                crate::gui::windows::shell_context_menu::warm_up_in_background();
             } else {
                 eprintln!("Failed to get HWND on first frame");
             }
