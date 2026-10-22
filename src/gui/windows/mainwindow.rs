@@ -415,6 +415,7 @@ impl eframe::App for MainWindow {
         if self.theme_dirty {
             apply_theme(ui.ctx(), self.theme);
             apply_font_to_context(ui.ctx(), &palette);
+            crate::gui::windows::dark_menu::sync_with_palette(&palette);
             if let Some(hwnd) = self.hwnd {
                 apply_window_theme(hwnd, &palette);
             }

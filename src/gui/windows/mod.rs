@@ -2,6 +2,7 @@ pub mod containers; // small reusable components
 
 pub mod about;
 pub mod customizetheme;
+pub mod dark_menu;
 pub mod dragdrop;
 pub mod eden_menu_entries;
 pub mod enums;
