@@ -47,11 +47,15 @@ const CMIC_MASK_UNICODE: u32 = 0x0000_4000;
 
 /// Debug/probe-only diagnostics. Release builds compile the call to a no-op,
 /// but the arguments still count as used so no cfg juggling is needed at the
-/// call sites.
+/// call sites. Lines from other threads than the UI thread are tagged with the
+/// thread name.
 #[inline(always)]
 pub fn debug_log(args: std::fmt::Arguments<'_>) {
     #[cfg(any(debug_assertions, feature = "ui-probe"))]
-    eprintln!("[shell-menu] {args}");
+    match std::thread::current().name() {
+        Some("main") => eprintln!("[shell-menu] {args}"),
+        name => eprintln!("[shell-menu@{}] {args}", name.unwrap_or("?")),
+    }
     #[cfg(not(any(debug_assertions, feature = "ui-probe")))]
     let _ = args;
 }
@@ -1140,51 +1144,300 @@ impl ShellContextMenu {
     }
 }
 
-/// How long after startup the shell menu handlers are loaded in advance.
-const WARM_UP_DELAY: Duration = Duration::from_secs(1);
+// ---------------------------------------------------------------------------
+// Background warm-up
+// ---------------------------------------------------------------------------
 
-/// Loads the shell's context menu handlers in the background: throwaway
-/// menus for a folder and a file, built and dropped on a separate STA thread
-/// shortly after startup. The handler DLLs stay loaded for the process, so
-/// the first file menu on the UI thread no longer pays for loading them
-/// (about 300 ms down to about 80 ms). The first *folder* menu of each parent
-/// folder still costs about 300 ms more than later ones (per-folder work in
-/// the handlers, not DLL loading). Call once at startup.
+/// How long after startup the background warm-up starts (leaves the first
+/// frames and the first listing alone).
+const WARM_UP_DELAY: Duration = Duration::from_secs(1);
+/// Folders remembered as warmed (oldest forgotten first).
+const WARMED_FOLDERS_CAP: usize = 256;
+
+/// Requests for [`warm_up_worker`]. Set once by [`warm_up_in_background`];
+/// unset when per-folder warm-ups are disabled.
+static WARM_UP_REQUESTS: std::sync::OnceLock<WarmUpRequests> = std::sync::OnceLock::new();
+
+/// Sending side of the warm-up worker's requests: items whose menus are
+/// built and dropped, and an auto-reset event that wakes the worker (it
+/// waits for that event and its window messages together).
+struct WarmUpRequests {
+    sender: crossbeam_channel::Sender<PathBuf>,
+    wake: WakeEvent,
+}
+
+/// An event handle (kernel object, usable from any thread). Lives as long as
+/// the process.
+#[derive(Clone, Copy)]
+struct WakeEvent(windows::Win32::Foundation::HANDLE);
+
+// SAFETY: event handles may be signaled and waited on from any thread.
+unsafe impl Send for WakeEvent {}
+unsafe impl Sync for WakeEvent {}
+
+thread_local! {
+    /// Folder of the latest [`request_folder_warm_up`] on this (the UI)
+    /// thread, so the listing batches and reloads of one folder send a
+    /// single request.
+    static LAST_WARM_UP_FOLDER: RefCell<Option<PathBuf>> = const { RefCell::new(None) };
+}
+
+/// Starts the background warm-up of shell context menus: one long-lived STA
+/// thread that builds and drops throwaway menus, so the menus the user opens
+/// on the UI thread are faster.
+///
+/// - Shortly after startup a folder and a file menu: the shell extension
+///   DLLs stay loaded for the process. The folder menu is built twice (see
+///   [`warm_up_worker`]); together this takes the first folder menu on the
+///   UI thread from about 400 ms down to about 60 ms.
+/// - Then a folder menu for every folder the user browses to (see
+///   [`request_folder_warm_up`]): in some folders the first folder menu
+///   costs about 300 ms more than later ones (measured in the user profile
+///   folder; per-folder work in the handlers, not DLL loading).
+///
+/// A warm-up racing a menu the user opens is harmless: separate COM objects,
+/// PIDLs and HMENUs in another apartment, and [`ShellContextMenu::build`]
+/// touches no shared state (the settings page's entry lists are only
+/// recorded when a menu is shown). At worst the user's menu is as slow as
+/// without warm-up.
+///
+/// Call once at startup. Probe runs can opt out to measure cold menus:
+/// `EDEN_PROBE_NO_WARM_UP=folders` skips the per-folder warm-ups only, any
+/// other value both.
 pub fn warm_up_in_background() {
-    // Probe runs can measure the cold first open.
-    if crate::core::probe_active() && std::env::var_os("EDEN_PROBE_NO_WARM_UP").is_some() {
-        return;
-    }
+    let opt_out = crate::core::probe_active()
+        .then(|| std::env::var_os("EDEN_PROBE_NO_WARM_UP"))
+        .flatten();
+    let folder_warm_ups = match &opt_out {
+        None => true,
+        Some(value) if value == "folders" => false,
+        Some(_) => return,
+    };
     let Ok(exe) = std::env::current_exe() else {
         return;
     };
-    let spawned = std::thread::Builder::new()
-        .name("shell-menu-warm-up".to_string())
-        .spawn(move || {
-            use windows::Win32::System::Com::{
-                COINIT_APARTMENTTHREADED, CoInitializeEx, CoUninitialize,
-            };
-            std::thread::sleep(WARM_UP_DELAY);
-            if unsafe { CoInitializeEx(None, COINIT_APARTMENTTHREADED) }.is_err() {
+    let (sender, requests) = crossbeam_channel::unbounded();
+    // Without stored requests the worker exits after the startup warm-up.
+    let wake = if folder_warm_ups {
+        use windows::Win32::System::Threading::CreateEventW;
+        let event = match unsafe { CreateEventW(None, false, false, None) } {
+            Ok(event) => WakeEvent(event),
+            Err(err) => {
+                eprintln!("Shell menu warm-up event failed: {err}");
                 return;
             }
-            let started = Instant::now();
-            let folder = exe.parent().map(Path::to_path_buf);
-            for path in folder.into_iter().chain(Some(exe)) {
-                if let Err(err) =
-                    ShellContextMenu::build(&[path], HWND::default(), ShellMenuKind::Filtered)
-                {
-                    debug_log(format_args!("warm-up failed: {err}"));
-                }
-            }
-            debug_log(format_args!(
-                "warm-up done in {:.2} ms",
-                started.elapsed().as_secs_f64() * 1000.0
-            ));
-            unsafe { CoUninitialize() };
-        });
+        };
+        if WARM_UP_REQUESTS
+            .set(WarmUpRequests {
+                sender,
+                wake: event,
+            })
+            .is_err()
+        {
+            return; // Already running.
+        }
+        Some(event)
+    } else {
+        None
+    };
+    let spawned = std::thread::Builder::new()
+        .name("shell-menu-warm-up".to_string())
+        .spawn(move || warm_up_worker(exe, requests, wake));
     if let Err(err) = spawned {
         eprintln!("Shell menu warm-up thread failed to start: {err}");
+    }
+}
+
+/// Asks the warm-up worker to build a menu for a subfolder of `folder`, the
+/// filesystem folder a view just listed, so the first folder menu there does
+/// not pay the per-folder cost while the user waits. `subfolder` picks the
+/// item (a directory directly in `folder`) and is only called for a folder
+/// other than the previous request's; `None` skips the folder.
+///
+/// UI thread only. Never blocks: the request is queued, the worker keeps
+/// only the latest pending one and skips folders it already warmed.
+pub fn request_folder_warm_up(folder: &Path, subfolder: impl FnOnce() -> Option<PathBuf>) {
+    let Some(queue) = WARM_UP_REQUESTS.get() else {
+        return;
+    };
+    let repeated = LAST_WARM_UP_FOLDER.with_borrow(|last| last.as_deref() == Some(folder));
+    if repeated {
+        return;
+    }
+    let Some(item) = subfolder() else {
+        return;
+    };
+    LAST_WARM_UP_FOLDER.set(Some(folder.to_path_buf()));
+    debug_log(format_args!("warm-up requested: {}", item.display()));
+    // Unbounded: never blocks. Fails only when the worker is gone.
+    if queue.sender.send(item).is_ok() {
+        let _ = unsafe { windows::Win32::System::Threading::SetEvent(queue.wake.0) };
+    }
+}
+
+/// The warm-up thread (see [`warm_up_in_background`]). Holds no locks and
+/// shares no state with the UI thread; every menu is its own set of COM
+/// objects in this thread's apartment. Without `wake` (per-folder warm-ups
+/// disabled) it ends after the startup warm-up.
+fn warm_up_worker(
+    exe: PathBuf,
+    requests: crossbeam_channel::Receiver<PathBuf>,
+    wake: Option<WakeEvent>,
+) {
+    use windows::Win32::System::Com::{COINIT_APARTMENTTHREADED, CoInitializeEx, CoUninitialize};
+
+    std::thread::sleep(WARM_UP_DELAY);
+    if unsafe { CoInitializeEx(None, COINIT_APARTMENTTHREADED) }.is_err() {
+        return;
+    }
+    let mut warmed = WarmedFolders::default();
+
+    // Startup: folder and file menus load the handler DLLs of both. The
+    // folder is the browsed one when it was requested in the meantime, else
+    // the exe's folder. The process's first folder menu comes out short of
+    // some entries (29 instead of 34 here: handlers still initializing) and
+    // the second one, on whichever thread, often pays another 300-800 ms.
+    // With a single build that second one was the user's first folder menu,
+    // so the folder menu is built twice.
+    let started = Instant::now();
+    let startup_folder = requests
+        .try_recv()
+        .ok()
+        .map(|item| latest_request(item, &requests))
+        .filter(|item| is_warm_up_target(item))
+        .or_else(|| exe.parent().map(Path::to_path_buf));
+    if let Some(folder) = &startup_folder {
+        warm_up_item(folder, &mut warmed);
+    }
+    build_throwaway_menu(&exe);
+    if let Some(folder) = &startup_folder {
+        build_throwaway_menu(folder);
+    }
+    debug_log(format_args!(
+        "startup warm-up done in {:.2} ms",
+        started.elapsed().as_secs_f64() * 1000.0
+    ));
+
+    // Per-folder warm-ups for as long as the process lives. An STA thread
+    // must keep pumping messages while it waits: shell extensions may have
+    // created windows on it or expect calls into the apartment.
+    if let Some(wake) = wake {
+        while pump_messages() {
+            if let Ok(item) = requests.try_recv() {
+                let item = latest_request(item, &requests);
+                if is_warm_up_target(&item) {
+                    warm_up_item(&item, &mut warmed);
+                }
+                // Requests sent during the build also set the event; look
+                // at the queue (and the messages) again before waiting.
+                continue;
+            }
+            if !wait_for_event_or_message(wake) {
+                break;
+            }
+        }
+    }
+    unsafe { CoUninitialize() };
+}
+
+/// Dispatches the thread's queued window messages. `false` on `WM_QUIT`.
+fn pump_messages() -> bool {
+    use windows::Win32::UI::WindowsAndMessaging::{
+        DispatchMessageW, MSG, PM_REMOVE, PeekMessageW, TranslateMessage, WM_QUIT,
+    };
+    let mut msg = MSG::default();
+    while unsafe { PeekMessageW(&mut msg, None, 0, 0, PM_REMOVE) }.as_bool() {
+        if msg.message == WM_QUIT {
+            return false;
+        }
+        unsafe {
+            let _ = TranslateMessage(&msg);
+            DispatchMessageW(&msg);
+        }
+    }
+    true
+}
+
+/// Blocks until `wake` is signaled or a message arrives for this thread.
+/// `false` when the wait failed (the worker then ends rather than spin).
+fn wait_for_event_or_message(wake: WakeEvent) -> bool {
+    use windows::Win32::Foundation::WAIT_FAILED;
+    use windows::Win32::System::Threading::INFINITE;
+    use windows::Win32::UI::WindowsAndMessaging::{
+        MWMO_INPUTAVAILABLE, MsgWaitForMultipleObjectsEx, QS_ALLINPUT,
+    };
+    let result = unsafe {
+        MsgWaitForMultipleObjectsEx(Some(&[wake.0]), INFINITE, QS_ALLINPUT, MWMO_INPUTAVAILABLE)
+    };
+    result != WAIT_FAILED
+}
+
+/// `received` or, when newer requests are queued, the newest one (superseded
+/// requests are dropped: only the folder the user is in now matters).
+fn latest_request(received: PathBuf, requests: &crossbeam_channel::Receiver<PathBuf>) -> PathBuf {
+    let mut latest = received;
+    while let Ok(newer) = requests.try_recv() {
+        let dropped = std::mem::replace(&mut latest, newer);
+        debug_log(format_args!("warm-up superseded: {}", dropped.display()));
+    }
+    latest
+}
+
+/// Whether a requested item is a plain filesystem directory (not a portable
+/// device object or a virtual location).
+fn is_warm_up_target(item: &Path) -> bool {
+    item.is_absolute()
+        && !crate::core::portable::is_portable_path(&item.to_path_buf())
+        && std::fs::metadata(item).is_ok_and(|meta| meta.is_dir())
+}
+
+/// Builds and drops the menu of `item` unless its parent folder was warmed
+/// already.
+fn warm_up_item(item: &Path, warmed: &mut WarmedFolders) {
+    if let Some(parent) = item.parent()
+        && !warmed.insert(parent)
+    {
+        debug_log(format_args!("warm-up skipped (warmed): {}", item.display()));
+        return;
+    }
+    build_throwaway_menu(item);
+}
+
+/// Builds and drops the menu of `item`. Built like a normal right-click
+/// menu, but nothing is pruned or recorded (that happens when a menu is
+/// shown, see `show_native`).
+fn build_throwaway_menu(item: &Path) {
+    let started = Instant::now();
+    let result = ShellContextMenu::build(
+        &[item.to_path_buf()],
+        HWND::default(),
+        ShellMenuKind::Filtered,
+    );
+    debug_log(format_args!(
+        "warm-up {} in {:.2} ms: {}",
+        if result.is_ok() { "done" } else { "failed" },
+        started.elapsed().as_secs_f64() * 1000.0,
+        item.display()
+    ));
+}
+
+/// Folders whose menus were warmed this session (case-insensitive, at most
+/// [`WARMED_FOLDERS_CAP`], oldest forgotten first).
+#[derive(Default)]
+struct WarmedFolders(std::collections::VecDeque<String>);
+
+impl WarmedFolders {
+    /// Records `folder`; `false` when it was recorded already.
+    fn insert(&mut self, folder: &Path) -> bool {
+        let key = folder.to_string_lossy().to_lowercase();
+        if self.0.contains(&key) {
+            return false;
+        }
+        if self.0.len() >= WARMED_FOLDERS_CAP {
+            self.0.pop_front();
+        }
+        self.0.push_back(key);
+        true
     }
 }
 
@@ -1374,6 +1627,51 @@ fn sanitize_label(raw: &str) -> String {
 mod tests {
     use super::*;
     use windows::Win32::UI::WindowsAndMessaging::GetSubMenu;
+
+    #[test]
+    fn warmed_folders_dedupe_case_insensitively_and_forget_the_oldest() {
+        let mut warmed = WarmedFolders::default();
+        assert!(warmed.insert(Path::new(r"C:\Users\Me")));
+        assert!(!warmed.insert(Path::new(r"c:\users\me")));
+        assert!(warmed.insert(Path::new(r"\\server\share\dir")));
+        for index in 0..WARMED_FOLDERS_CAP {
+            warmed.insert(&PathBuf::from(format!(r"D:\{index}")));
+        }
+        assert_eq!(warmed.0.len(), WARMED_FOLDERS_CAP);
+        // The first folders were forgotten, the latest are remembered.
+        assert!(warmed.insert(Path::new(r"C:\Users\Me")));
+        assert!(!warmed.insert(&PathBuf::from(format!(r"D:\{}", WARMED_FOLDERS_CAP - 1))));
+    }
+
+    #[test]
+    fn warm_up_requests_coalesce_to_the_latest() {
+        let (sender, requests) = crossbeam_channel::unbounded();
+        assert_eq!(
+            latest_request(PathBuf::from(r"C:\a"), &requests),
+            PathBuf::from(r"C:\a")
+        );
+        for path in [r"C:\b", r"C:\c", r"C:\d"] {
+            sender.send(PathBuf::from(path)).unwrap();
+        }
+        assert_eq!(
+            latest_request(PathBuf::from(r"C:\a"), &requests),
+            PathBuf::from(r"C:\d")
+        );
+        assert!(requests.is_empty());
+    }
+
+    #[test]
+    fn warm_up_targets_are_plain_directories() {
+        let dir = std::env::temp_dir();
+        assert!(is_warm_up_target(&dir));
+        assert!(!is_warm_up_target(&std::env::current_exe().unwrap()));
+        assert!(!is_warm_up_target(Path::new(crate::core::fs::MY_PC_PATH)));
+        assert!(!is_warm_up_target(Path::new(
+            crate::core::fs::MY_RECYCLE_BIN_PATH
+        )));
+        assert!(!is_warm_up_target(Path::new("portable://device/object")));
+        assert!(!is_warm_up_target(&dir.join("eden-no-such-folder-7f3a")));
+    }
 
     #[test]
     fn sanitize_label_strips_mnemonics() {

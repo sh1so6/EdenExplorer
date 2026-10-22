@@ -1,0 +1,61 @@
+# First folder menu after navigating into a folder, with the per-folder
+# background warm-up given time to finish and clicked right away. Probe mode
+# only builds and prepares the menu (see context_native_timing.txt); the
+# "[shell-menu]" stderr lines have the timings, "[shell-menu@shell-menu-warm-up]"
+# lines are the background builds, and every "waited" log line has the longest
+# UI frame gap of that wait.
+# Scratch folder (launch path) with four folders, each with two subfolders:
+#   for d in A B C D; do mkdir -p "$TEMP/eden-warm-scratch/$d/${d}1" "$TEMP/eden-warm-scratch/$d/${d}2"; done
+#   EDEN_PROBE_SCRIPT=<abs path of this file> EDEN_PROBE_DATA_DIR=<scratch data dir> \
+#     target/probe/release/EdenExplorer.exe "%TEMP%\eden-warm-scratch" 2> stderr.log
+# EDEN_PROBE_NO_WARM_UP=folders measures without the per-folder warm-ups
+# (startup warm-up only), any other value without both.
+# Run it a few times each way (the timings are noisy) and compare the first
+# "[shell-menu] build" line after each click.
+# Rows: y=104 first item, y=124 second, y=144 third, y=164 fourth.
+size 1117 717
+wait_ms 3000
+# 1. Launch folder, warm-up long done: right-click A.
+click 340 104 right
+wait_ms 800
+key Escape
+wait_ms 300
+# 2. Into A, warm-up given 1.5 s: right-click A1.
+click 340 104
+key Enter
+wait_ms 1500
+click 340 104 right
+wait_ms 800
+key Escape
+key Backspace
+wait_ms 500
+# 3. Into B, right-click B1 right away (~100 ms, racing the warm-up).
+click 340 124
+key Enter
+wait_ms 100
+click 340 104 right
+wait_ms 800
+key Escape
+key Backspace
+wait_ms 500
+# 4. Into C, right-click C1 after ~300 ms (warm-up still running).
+click 340 144
+key Enter
+wait_ms 300
+click 340 104 right
+wait_ms 800
+key Escape
+key Backspace
+wait_ms 500
+# 5. Into D, no click: UI frame gaps while the warm-up runs.
+click 340 164
+key Enter
+wait_ms 1500
+# D1 (warmed by now), then D2 for comparison.
+click 340 104 right
+wait_ms 800
+click 340 124 right
+wait_ms 800
+key Escape
+wait_ms 300
+quit

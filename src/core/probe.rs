@@ -271,10 +271,21 @@ fn parse_modifiers(flags: &[&str]) -> Result<egui::Modifiers, String> {
 enum Step {
     WaitFrames(u32),
     WaitMs(u64),
-    WaitUntil(Instant),
+    /// Deadline, and the wait's start and longest frame-to-frame gap so far
+    /// (logged when it ends: a stalled UI thread shows up as a long gap).
+    WaitUntil {
+        deadline: Instant,
+        started: Instant,
+        start_frame: u64,
+        last_tick: Instant,
+        max_gap: Duration,
+    },
     Input(Vec<egui::Event>, egui::Modifiers),
     Shot(PathBuf),
-    AwaitShot { path: PathBuf, since: Instant },
+    AwaitShot {
+        path: PathBuf,
+        since: Instant,
+    },
     Quit,
 }
 
@@ -540,12 +551,35 @@ impl Runner {
                     return;
                 }
                 Step::WaitMs(ms) => {
-                    *step = Step::WaitUntil(Instant::now() + Duration::from_millis(*ms));
+                    let now = Instant::now();
+                    *step = Step::WaitUntil {
+                        deadline: now + Duration::from_millis(*ms),
+                        started: now,
+                        start_frame: self.frame,
+                        last_tick: now,
+                        max_gap: Duration::ZERO,
+                    };
                     continue;
                 }
-                Step::WaitUntil(deadline) => {
-                    if Instant::now() >= *deadline {
+                Step::WaitUntil {
+                    deadline,
+                    started,
+                    start_frame,
+                    last_tick,
+                    max_gap,
+                } => {
+                    let now = Instant::now();
+                    *max_gap = (*max_gap).max(now - *last_tick);
+                    *last_tick = now;
+                    if now >= *deadline {
+                        let message = format!(
+                            "waited {:.0} ms: {} frames, max frame gap {:.1} ms",
+                            (now - *started).as_secs_f64() * 1000.0,
+                            self.frame - *start_frame,
+                            max_gap.as_secs_f64() * 1000.0
+                        );
                         self.queue.pop_front();
+                        self.log(&message);
                         continue;
                     }
                     return;

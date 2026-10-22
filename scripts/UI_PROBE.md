@@ -90,6 +90,9 @@ Timing:
 - 5 warm-up frames run before the first command. Use `wait_ms` to let async
   content (drives, folders, thumbnails) load.
 - After every input command the probe waits 2 frames.
+- When a `wait_ms` ends, the log notes its frame count and longest frame-to-frame
+  gap (`waited 1503 ms: 248 frames, max frame gap 6.6 ms`): a UI thread stalled
+  by background work shows up as a long gap.
 - `shot` waits until at least 3 frames and 250 ms have passed since the last
   input, so hover animations can settle. The next command only runs after the
   PNG is written. A screenshot that has not arrived after 5 s is logged as an

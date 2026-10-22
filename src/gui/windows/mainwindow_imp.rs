@@ -2308,6 +2308,26 @@ impl MainWindow {
         }
     }
 
+    /// Has the shell menu of a subfolder of the view's folder built in the
+    /// background (the first folder menu of a folder is otherwise about
+    /// 300 ms slower). Plain filesystem folders only: the drives view and the
+    /// Recycle Bin have no listing channel, portable devices are skipped.
+    fn request_folder_menu_warm_up(&self, side: SplitSide) {
+        let view = self.active_tab().view(side);
+        let folder = &view.nav.current;
+        if !folder.is_absolute() || crate::core::portable::is_portable_path(folder) {
+            return;
+        }
+        crate::gui::windows::shell_context_menu::request_folder_warm_up(folder, || {
+            // The topmost subfolder, the likeliest to be right-clicked.
+            let dirs = || view.files.iter().filter(|item| item.is_dir);
+            dirs()
+                .find(|item| !item.is_hidden)
+                .or_else(|| dirs().next())
+                .map(|item| item.path.clone())
+        });
+    }
+
     fn handle_directory_batch_recieve_for(&mut self, side: SplitSide) -> bool {
         if self.active_tab().view(side).rx.is_none() {
             return false;
@@ -2353,12 +2373,16 @@ impl MainWindow {
                 }
             }
 
+            let batch_has_dir = batch.iter().any(|item| item.is_dir);
             let sort_keys = self.active_tab().view(side).sort_keys.clone();
             let tag_counts = self.tag_counts_for_sort_keys(&sort_keys);
             let view = self.active_tab_mut().view_mut(side);
             view.files.extend(batch);
             sort_files_by_keys(&mut view.files, &sort_keys, &tag_counts);
             any_change = true;
+            if batch_has_dir {
+                self.request_folder_menu_warm_up(side);
+            }
         }
 
         if disconnected {
