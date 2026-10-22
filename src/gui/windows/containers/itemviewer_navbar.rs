@@ -1,5 +1,7 @@
 use crate::core::fs::{MY_PC_PATH, MY_RECYCLE_BIN_PATH};
 use crate::core::portable;
+use crate::core::utils::text::apply_eden_text_overrides;
+use crate::core::utils::widgets::apply_eden_visual_overrides;
 use crate::gui::i18n::I18n;
 use crate::gui::icons::IconCache;
 use crate::gui::theme::ThemePalette;
@@ -234,11 +236,19 @@ pub fn draw_itemviewer_navigation_bar(
         } else {
             let font_id = egui::FontId::new(palette.text_size, egui::FontFamily::Proportional);
             let breadcrumbs = build_breadcrumbs(&tab.nav.current);
-            let segments = layout_breadcrumbs(ui, &breadcrumbs, breadcrumb_width, &font_id);
+            let layout = layout_breadcrumbs(ui, &breadcrumbs, breadcrumb_width, &font_id);
+            // Per view: split panes draw separate navigation bars.
+            let ellipsis_popup_id = ui.id().with(("breadcrumb_ellipsis_popup", tab_id));
+
+            // A path change can remove the ellipsis while its popup is open.
+            if layout.omitted.is_empty() {
+                egui::Popup::close_id(ui.ctx(), ellipsis_popup_id);
+            }
+
             let mut first = true;
             let mut breadcrumbs_right = 0.0;
 
-            for crumb in &segments {
+            for crumb in &layout.segments {
                 if !first {
                     let old_spacing = ui.spacing().item_spacing;
                     ui.spacing_mut().item_spacing.x = 10.0;
@@ -259,7 +269,6 @@ pub fn draw_itemviewer_navigation_bar(
                     ui,
                     &resp,
                     crumb,
-                    &segments,
                     palette,
                     drag_active,
                     hovered_target_ref,
@@ -271,7 +280,18 @@ pub fn draw_itemviewer_navigation_bar(
 
                 handle_breadcrumb_hover(ui, &resp);
 
-                handle_breadcrumb_click(&resp, crumb, &segments, drag_active, &mut action);
+                handle_breadcrumb_click(&resp, crumb, drag_active, &mut action);
+
+                if crumb.is_ellipsis {
+                    show_omitted_breadcrumbs_popup(
+                        &resp,
+                        ellipsis_popup_id,
+                        &layout.omitted,
+                        palette,
+                        drag_active,
+                        &mut action,
+                    );
+                }
 
                 breadcrumbs_right = resp.rect.right();
             }
@@ -576,34 +596,100 @@ fn measure_breadcrumb_width(ui: &egui::Ui, font_id: &egui::FontId, text: &str) -
         .x
 }
 
-fn truncate_breadcrumb_to_width(
-    ui: &egui::Ui,
-    font_id: &egui::FontId,
+/// Label of the crumb standing in for omitted ancestors, and the suffix of truncated labels.
+const BREADCRUMB_ELLIPSIS: &str = "...";
+/// Horizontal inner margin of a breadcrumb frame (6px on each side, see `draw_breadcrumb`).
+const BREADCRUMB_ITEM_PADDING: f32 = 12.0;
+/// Item spacing used after the ">" separator label (see the breadcrumb loop).
+const BREADCRUMB_SEPARATOR_SPACING: f32 = 10.0;
+
+/// Shortens `text` to its longest prefix that, followed by [`BREADCRUMB_ELLIPSIS`], is at most
+/// `max_width` wide. Returns the shortened label and its measured width.
+///
+/// Always keeps at least one character, even if that overflows `max_width`. Returns `None`
+/// when `text` has fewer than two characters and so cannot be shortened.
+///
+/// Binary search over char boundaries: `O(log n)` measurements instead of one per char.
+fn truncate_label_to_width(
     text: &str,
     max_width: f32,
-) -> (String, bool) {
-    if measure_breadcrumb_width(ui, font_id, text) <= max_width {
-        return (text.to_owned(), false);
+    measure: &impl Fn(&str) -> f32,
+) -> Option<(String, f32)> {
+    // ends[k - 1] is the byte length of the prefix holding the first k chars.
+    let ends: Vec<usize> = text
+        .char_indices()
+        .map(|(i, _)| i)
+        .skip(1)
+        .chain(std::iter::once(text.len()))
+        .collect();
+    let char_count = ends.len();
+
+    if char_count < 2 {
+        return None;
     }
 
-    let ellipsis = "...";
-    let ellipsis_width = measure_breadcrumb_width(ui, font_id, ellipsis);
+    let candidate = |chars: usize| {
+        let prefix = &text[..ends[chars - 1]];
+        let trimmed = prefix.trim_end();
+        let prefix = if trimmed.is_empty() { prefix } else { trimmed };
+        let label = format!("{prefix}{BREADCRUMB_ELLIPSIS}");
+        let width = measure(&label);
+        (label, width)
+    };
 
-    let mut result = String::new();
+    let mut best = None;
+    let (mut low, mut high) = (1, char_count - 1);
 
-    for ch in text.chars() {
-        let candidate = format!("{result}{ch}");
+    while low <= high {
+        let mid = low + (high - low) / 2;
+        let (label, width) = candidate(mid);
 
-        if measure_breadcrumb_width(ui, font_id, &candidate) + ellipsis_width > max_width {
-            break;
+        if width <= max_width {
+            best = Some((label, width));
+            low = mid + 1;
+        } else {
+            high = mid - 1;
         }
-
-        result.push(ch);
     }
 
-    result.push_str(ellipsis);
+    Some(best.unwrap_or_else(|| candidate(1)))
+}
 
-    (result, true)
+fn rendered_breadcrumb(crumb: &Breadcrumb, width: f32) -> RenderedBreadcrumb {
+    RenderedBreadcrumb {
+        label: crumb.label.clone(),
+        full_label: crumb.label.clone(),
+        path: crumb.path.clone(),
+        truncated: false,
+        is_ellipsis: false,
+        width,
+    }
+}
+
+/// Renders `crumb`, truncating its label if its full `width` exceeds `max_width`.
+fn fit_breadcrumb(
+    crumb: &Breadcrumb,
+    width: f32,
+    max_width: f32,
+    measure: &impl Fn(&str) -> f32,
+) -> RenderedBreadcrumb {
+    let mut rendered = rendered_breadcrumb(crumb, width);
+
+    if width > max_width {
+        let max_label_width = max_width - BREADCRUMB_ITEM_PADDING;
+
+        // A very short label can be narrower than its truncated form; keep it whole then.
+        if let Some((label, label_width)) =
+            truncate_label_to_width(&crumb.label, max_label_width, measure)
+                .filter(|(_, label_width)| label_width + BREADCRUMB_ITEM_PADDING < width)
+        {
+            rendered.label = label;
+            rendered.truncated = true;
+            rendered.width = label_width + BREADCRUMB_ITEM_PADDING;
+        }
+    }
+
+    rendered
 }
 
 fn build_breadcrumbs(path: &Path) -> Vec<Breadcrumb> {
@@ -651,104 +737,162 @@ fn build_breadcrumbs(path: &Path) -> Vec<Breadcrumb> {
     breadcrumbs
 }
 
+/// Breadcrumbs that fit the navigation bar, plus the ancestors hidden behind the
+/// ellipsis crumb (in path order; empty when nothing was omitted).
+#[derive(Debug, Default)]
+struct BreadcrumbLayout {
+    segments: Vec<RenderedBreadcrumb>,
+    omitted: Vec<Breadcrumb>,
+}
+
 fn layout_breadcrumbs(
     ui: &egui::Ui,
     breadcrumbs: &[Breadcrumb],
     available_width: f32,
     font_id: &egui::FontId,
-) -> Vec<RenderedBreadcrumb> {
-    const SEPARATOR_WIDTH: f32 = 18.0;
-    const ITEM_PADDING: f32 = 12.0;
+) -> BreadcrumbLayout {
+    let measure = |text: &str| measure_breadcrumb_width(ui, font_id, text);
+    // Spacing before ">", the ">" label itself, and the spacing after it.
+    let separator_width = ui.spacing().item_spacing.x + measure(">") + BREADCRUMB_SEPARATOR_SPACING;
 
-    if breadcrumbs.is_empty() {
-        return Vec::new();
-    }
+    compute_breadcrumb_layout(breadcrumbs, available_width, separator_width, measure)
+}
 
-    // Measure every breadcrumb once.
-    let measured: Vec<RenderedBreadcrumb> = breadcrumbs
+/// Fits `breadcrumbs` into `available_width`. Pure: text widths come from `measure`.
+///
+/// Priorities, highest first:
+/// 1. The current folder (last crumb) is always shown, truncated only when even
+///    `first > ... > current` doesn't fit.
+/// 2. The first crumb (drive, UNC share or portable device) is always shown. A long one is
+///    truncated before the current folder; when both are long they share the space.
+/// 3. Ancestors are added right to left (nearest to the current folder first) while they fit;
+///    the rest collapse into one ellipsis crumb whose `path` is the deepest omitted folder.
+///
+/// In extreme cases (`first > ... > c...` alone is too wide) the result overflows slightly
+/// rather than dropping a crumb.
+fn compute_breadcrumb_layout(
+    breadcrumbs: &[Breadcrumb],
+    available_width: f32,
+    separator_width: f32,
+    measure: impl Fn(&str) -> f32,
+) -> BreadcrumbLayout {
+    let Some(last) = breadcrumbs.len().checked_sub(1) else {
+        return BreadcrumbLayout::default();
+    };
+
+    let widths: Vec<f32> = breadcrumbs
         .iter()
-        .map(|crumb| RenderedBreadcrumb {
-            label: crumb.label.clone(),
-            full_label: crumb.label.clone(),
-            path: crumb.path.clone(),
-            truncated: false,
-            is_ellipsis: false,
-            width: measure_breadcrumb_width(ui, font_id, &crumb.label) + ITEM_PADDING,
-        })
+        .map(|crumb| measure(&crumb.label) + BREADCRUMB_ITEM_PADDING)
         .collect();
 
     // Fast path: everything fits.
-    let total_width: f32 = measured.iter().map(|c| c.width).sum::<f32>()
-        + SEPARATOR_WIDTH * measured.len().saturating_sub(1) as f32;
+    let total_width = widths.iter().sum::<f32>() + separator_width * last as f32;
 
     if total_width <= available_width {
-        return measured;
+        return BreadcrumbLayout {
+            segments: breadcrumbs
+                .iter()
+                .zip(&widths)
+                .map(|(crumb, &width)| rendered_breadcrumb(crumb, width))
+                .collect(),
+            omitted: Vec::new(),
+        };
     }
 
-    let ellipsis_width = measure_breadcrumb_width(ui, font_id, "...") + ITEM_PADDING;
+    if last == 0 {
+        return BreadcrumbLayout {
+            segments: vec![fit_breadcrumb(
+                &breadcrumbs[0],
+                widths[0],
+                available_width,
+                &measure,
+            )],
+            omitted: Vec::new(),
+        };
+    }
 
-    let mut result = Vec::new();
+    // Ancestors between the first crumb and the current folder.
+    let has_middle = last > 1;
+    let ellipsis_width = if has_middle {
+        measure(BREADCRUMB_ELLIPSIS) + BREADCRUMB_ITEM_PADDING
+    } else {
+        0.0
+    };
+    let ellipsis_slot = if has_middle {
+        ellipsis_width + separator_width
+    } else {
+        0.0
+    };
 
-    // Always keep the first breadcrumb.
-    result.push(measured[0].clone());
+    // Reserve the current folder at full width, then the first crumb and the ellipsis.
+    let mut budget = available_width - widths[last] - widths[0] - separator_width - ellipsis_slot;
 
-    let mut used_width = measured[0].width;
+    // Visible ancestors are `first_visible..last`; fill them in from the right.
+    let mut first_visible = last;
 
-    // Keep as many breadcrumbs from the right as possible.
-    let mut right_side = Vec::new();
+    while first_visible > 1 {
+        let needed = widths[first_visible - 1] + separator_width;
 
-    for crumb in measured.iter().skip(1).rev() {
-        let needed = crumb.width + SEPARATOR_WIDTH;
-
-        // Leave room for:
-        //   - separator before "..."
-        //   - "..."
-        //   - separator after "..."
-        let reserved = SEPARATOR_WIDTH + ellipsis_width + SEPARATOR_WIDTH;
-
-        if used_width + reserved + needed <= available_width {
-            used_width += needed;
-            right_side.push(crumb.clone());
-        } else {
+        if needed > budget {
             break;
         }
+
+        budget -= needed;
+        first_visible -= 1;
     }
 
-    right_side.reverse();
+    let omitted = breadcrumbs[1..first_visible].to_vec();
 
-    let omitted = right_side.len() < measured.len() - 1;
+    let mut segments = Vec::with_capacity(last - first_visible + 3);
+    segments.push(rendered_breadcrumb(&breadcrumbs[0], widths[0]));
 
-    if omitted {
-        result.push(RenderedBreadcrumb {
-            label: "...".into(),
-            full_label: "...".into(),
-            path: measured[0].path.clone(),
+    // Width of everything except the first crumb and the current folder (with separators).
+    let mut middle_width = separator_width;
+
+    if let Some(deepest) = omitted.last() {
+        segments.push(RenderedBreadcrumb {
+            label: BREADCRUMB_ELLIPSIS.into(),
+            full_label: BREADCRUMB_ELLIPSIS.into(),
+            path: deepest.path.clone(),
             truncated: false,
             is_ellipsis: true,
             width: ellipsis_width,
         });
+        middle_width += ellipsis_slot;
     }
 
-    result.extend(right_side);
-
-    // Truncate only the final breadcrumb if needed.
-    if let Some(last_index) = result.len().checked_sub(1) {
-        let consumed: f32 = result[..last_index]
-            .iter()
-            .map(|c| c.width + SEPARATOR_WIDTH)
-            .sum();
-
-        let remaining = (available_width - consumed).max(80.0);
-
-        let full = result[last_index].full_label.clone();
-
-        let (label, truncated) = truncate_breadcrumb_to_width(ui, font_id, &full, remaining);
-
-        result[last_index].label = label;
-        result[last_index].truncated = truncated;
+    for index in first_visible..last {
+        segments.push(rendered_breadcrumb(&breadcrumbs[index], widths[index]));
+        middle_width += widths[index] + separator_width;
     }
 
-    result
+    // Ancestors are only added when the first crumb and the current folder fit whole, so
+    // truncation below only happens with no visible ancestor. The current folder keeps its
+    // full width while the first crumb can spare it; if both are long they split the space.
+    let space = available_width - middle_width;
+    let first_budget = if widths[0] + widths[last] <= space {
+        widths[0]
+    } else {
+        (space - widths[last]).max(space / 2.0)
+    };
+
+    let mut first = fit_breadcrumb(&breadcrumbs[0], widths[0], first_budget, &measure);
+    let current = fit_breadcrumb(
+        &breadcrumbs[last],
+        widths[last],
+        space - first.width,
+        &measure,
+    );
+
+    // Even the minimal current label overflows: give it room taken from the first crumb.
+    if first.width + current.width > space {
+        first = fit_breadcrumb(&breadcrumbs[0], widths[0], space - current.width, &measure);
+    }
+
+    segments[0] = first;
+    segments.push(current);
+
+    BreadcrumbLayout { segments, omitted }
 }
 
 fn draw_breadcrumb(
@@ -790,28 +934,64 @@ fn handle_breadcrumb_hover(ui: &egui::Ui, resp: &egui::Response) {
 fn handle_breadcrumb_click(
     resp: &egui::Response,
     crumb: &RenderedBreadcrumb,
-    segments: &[RenderedBreadcrumb],
     drag_active: bool,
     action: &mut ItemViewerNavBarAction,
 ) {
-    if drag_active || !resp.clicked() {
+    // The ellipsis crumb opens the omitted-folders popup instead of navigating.
+    if drag_active || crumb.is_ellipsis || !resp.clicked() {
         return;
     }
 
-    if crumb.is_ellipsis {
-        if let Some(first) = segments.first() {
-            action.nav_to = Some(first.path.clone());
-        }
-    } else {
-        action.nav_to = Some(crumb.path.clone());
-    }
+    action.nav_to = Some(crumb.path.clone());
 }
 
+/// Dropdown under the ellipsis crumb listing the omitted ancestors in path order.
+/// Picking one navigates there.
+fn show_omitted_breadcrumbs_popup(
+    resp: &egui::Response,
+    popup_id: egui::Id,
+    omitted: &[Breadcrumb],
+    palette: &ThemePalette,
+    drag_active: bool,
+    action: &mut ItemViewerNavBarAction,
+) {
+    let mut popup = egui::Popup::menu(resp)
+        .id(popup_id)
+        .close_behavior(egui::PopupCloseBehavior::CloseOnClick);
+
+    if drag_active {
+        popup = popup.open_memory(None::<egui::SetOpenCommand>);
+    }
+
+    popup.show(|ui| {
+        apply_eden_visual_overrides(ui, palette);
+        apply_eden_text_overrides(ui, palette);
+        ui.style_mut().wrap_mode = Some(egui::TextWrapMode::Extend);
+
+        egui::ScrollArea::vertical()
+            .max_height(ui.ctx().content_rect().height() * 0.6)
+            .show(ui, |ui| {
+                for crumb in omitted {
+                    let label = format!("{}  {}", regular::FOLDER_SIMPLE, crumb.label);
+                    let button = ui.add(egui::Button::new(
+                        egui::RichText::new(label).color(palette.text_normal),
+                    ));
+
+                    if button.clicked() {
+                        action.nav_to = Some(crumb.path.clone());
+                        ui.close();
+                    }
+                }
+            });
+    });
+}
+
+/// Highlights `crumb` while files are dragged over it and records it as the drop target on
+/// release. The ellipsis crumb's `path` is the deepest omitted folder (the last popup entry).
 fn handle_breadcrumb_drag(
     ui: &egui::Ui,
     resp: &egui::Response,
     crumb: &RenderedBreadcrumb,
-    segments: &[RenderedBreadcrumb],
     palette: &ThemePalette,
     drag_active: bool,
     hovered_target_ref: Option<&PathBuf>,
@@ -824,14 +1004,8 @@ fn handle_breadcrumb_drag(
         return;
     }
 
-    let breadcrumb_target_path = if crumb.is_ellipsis {
-        segments.first().map(|c| &c.path)
-    } else {
-        Some(&crumb.path)
-    };
-
-    let hovered = breadcrumb_target_path
-        .and_then(|target_path| hovered_target_ref.map(|target| target == target_path))
+    let hovered = hovered_target_ref
+        .map(|target| *target == crumb.path)
         .unwrap_or_else(|| {
             pointer_pos
                 .map(|pointer| resp.rect.contains(pointer))
@@ -857,16 +1031,8 @@ fn handle_breadcrumb_drag(
     );
 
     if pointer_released {
-        let target = if crumb.is_ellipsis {
-            segments.first().map(|c| c.path.clone())
-        } else {
-            Some(crumb.path.clone())
-        };
-
-        if let Some(target) = target {
-            *breadcrumb_drop_target = Some(target);
-            action.move_files_to_breadcrumb_dir_rect = Some(resp.rect);
-        }
+        *breadcrumb_drop_target = Some(crumb.path.clone());
+        action.move_files_to_breadcrumb_dir_rect = Some(resp.rect);
     }
 }
 
@@ -885,4 +1051,313 @@ fn merge_toolbar_action(action: &mut ItemViewerNavBarAction, toolbar: ItemViewer
     action.add_favorite |= toolbar.add_favorite;
     action.remove_favorite |= toolbar.remove_favorite;
     action.toggle_gallery |= toolbar.toggle_gallery;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::cell::Cell;
+
+    const CHAR_WIDTH: f32 = 10.0;
+    const SEPARATOR: f32 = 20.0;
+
+    /// Monospace stand-in for egui text measurement.
+    fn measure(text: &str) -> f32 {
+        text.chars().count() as f32 * CHAR_WIDTH
+    }
+
+    fn crumbs(labels: &[&str]) -> Vec<Breadcrumb> {
+        let mut path = PathBuf::new();
+        labels
+            .iter()
+            .map(|label| {
+                path.push(label);
+                Breadcrumb {
+                    label: (*label).to_owned(),
+                    path: path.clone(),
+                }
+            })
+            .collect()
+    }
+
+    fn layout(labels: &[&str], available_width: f32) -> BreadcrumbLayout {
+        compute_breadcrumb_layout(&crumbs(labels), available_width, SEPARATOR, measure)
+    }
+
+    fn labels(layout: &BreadcrumbLayout) -> Vec<&str> {
+        layout.segments.iter().map(|c| c.label.as_str()).collect()
+    }
+
+    fn omitted_labels(layout: &BreadcrumbLayout) -> Vec<&str> {
+        layout.omitted.iter().map(|c| c.label.as_str()).collect()
+    }
+
+    fn total_width(layout: &BreadcrumbLayout) -> f32 {
+        layout.segments.iter().map(|c| c.width).sum::<f32>()
+            + SEPARATOR * layout.segments.len().saturating_sub(1) as f32
+    }
+
+    fn width_of(labels: &[&str]) -> f32 {
+        labels
+            .iter()
+            .map(|label| measure(label) + BREADCRUMB_ITEM_PADDING)
+            .sum::<f32>()
+            + SEPARATOR * labels.len().saturating_sub(1) as f32
+    }
+
+    const DEEP: [&str; 6] = ["C:", "Users", "someone", "Documents", "Projects", "Eden"];
+
+    #[test]
+    fn everything_fits_without_ellipsis() {
+        let result = layout(&DEEP, width_of(&DEEP));
+
+        assert_eq!(labels(&result), DEEP);
+        assert!(result.omitted.is_empty());
+        assert!(
+            result
+                .segments
+                .iter()
+                .all(|c| !c.truncated && !c.is_ellipsis)
+        );
+    }
+
+    #[test]
+    fn empty_path_yields_nothing() {
+        let result = layout(&[], 100.0);
+
+        assert!(result.segments.is_empty());
+        assert!(result.omitted.is_empty());
+    }
+
+    #[test]
+    fn single_crumb_is_truncated_only_when_too_wide() {
+        assert_eq!(labels(&layout(&["C:"], 100.0)), ["C:"]);
+
+        let result = layout(&["Very long portable device"], 100.0);
+
+        assert_eq!(result.segments.len(), 1);
+        assert!(result.segments[0].truncated);
+        assert!(result.segments[0].label.ends_with(BREADCRUMB_ELLIPSIS));
+        assert_eq!(result.segments[0].full_label, "Very long portable device");
+        assert!(result.segments[0].width <= 100.0);
+    }
+
+    #[test]
+    fn two_crumbs_truncate_the_current_folder() {
+        let names = ["C:", "A folder with a very long name"];
+        let result = layout(&names, 200.0);
+
+        assert_eq!(result.segments.len(), 2);
+        assert_eq!(result.segments[0].label, "C:");
+        assert!(!result.segments.iter().any(|c| c.is_ellipsis));
+        assert!(result.segments[1].truncated);
+        assert_eq!(result.segments[1].full_label, names[1]);
+        assert!(total_width(&result) <= 200.0);
+    }
+
+    #[test]
+    fn ancestors_fill_from_the_right_and_current_stays_whole() {
+        // Room for C: > ... > Projects > Eden but not Documents.
+        let width = width_of(&["C:", BREADCRUMB_ELLIPSIS, "Projects", "Eden"]) + 5.0;
+        let result = layout(&DEEP, width);
+
+        assert_eq!(labels(&result), ["C:", "...", "Projects", "Eden"]);
+        assert_eq!(omitted_labels(&result), ["Users", "someone", "Documents"]);
+        assert!(result.segments.iter().all(|c| !c.truncated));
+        assert!(total_width(&result) <= width);
+    }
+
+    #[test]
+    fn ellipsis_targets_the_deepest_omitted_folder() {
+        let width = width_of(&["C:", BREADCRUMB_ELLIPSIS, "Projects", "Eden"]);
+        let result = layout(&DEEP, width);
+        let ellipsis = &result.segments[1];
+
+        assert!(ellipsis.is_ellipsis);
+        assert_eq!(ellipsis.path, result.omitted.last().unwrap().path);
+        assert_eq!(ellipsis.path, PathBuf::from_iter(&DEEP[..4]));
+    }
+
+    #[test]
+    fn current_survives_when_first_and_current_overflow() {
+        // The old layout truncated the "..." crumb itself and lost the current folder.
+        let names = ["C:", "Users", "An extremely long current folder name"];
+        let width = 200.0;
+        let result = layout(&names, width);
+
+        assert_eq!(result.segments.len(), 3);
+        assert_eq!(result.segments[0].label, "C:");
+        assert!(result.segments[1].is_ellipsis);
+        let current = result.segments.last().unwrap();
+        assert!(!current.is_ellipsis);
+        assert!(current.truncated);
+        assert_eq!(current.full_label, names[2]);
+        assert_eq!(current.path, PathBuf::from_iter(names));
+        assert_eq!(omitted_labels(&result), ["Users"]);
+        assert!(total_width(&result) <= width);
+    }
+
+    #[test]
+    fn extreme_width_keeps_first_and_current() {
+        for width in [0.0, 10.0, 40.0, 80.0, 120.0] {
+            let result = layout(&DEEP, width);
+
+            assert_eq!(result.segments.len(), 3, "width {width}");
+            assert_eq!(result.segments[0].full_label, "C:");
+            assert!(result.segments[1].is_ellipsis);
+            assert_eq!(result.segments[2].full_label, "Eden");
+            assert_eq!(result.segments[2].path, PathBuf::from_iter(DEEP));
+        }
+    }
+
+    #[test]
+    fn long_first_crumb_shrinks_before_current_overflows() {
+        // Portable device names and UNC shares can make the first crumb very wide.
+        let names = [r"\\fileserver\departments", "Shared", "Reports"];
+        let width = 260.0;
+        let result = layout(&names, width);
+
+        let first = &result.segments[0];
+        let current = result.segments.last().unwrap();
+        assert!(first.truncated);
+        assert_eq!(first.full_label, names[0]);
+        assert!(result.segments[1].is_ellipsis);
+        assert_eq!(current.label, "Reports");
+        assert!(!current.truncated);
+        assert!(total_width(&result) <= width);
+
+        // Narrower than even the minimal `\... > ... > R...`: overflow minimally, keep both.
+        let width = 160.0;
+        let result = layout(&names, width);
+        let current = result.segments.last().unwrap();
+        assert_eq!(result.segments.len(), 3);
+        assert_eq!(result.segments[0].full_label, names[0]);
+        assert!(result.segments[0].truncated);
+        assert!(!current.is_ellipsis);
+        assert_eq!(current.full_label, "Reports");
+        assert_eq!(
+            total_width(&result),
+            width_of(&[r"\...", BREADCRUMB_ELLIPSIS, "R..."])
+        );
+    }
+
+    #[test]
+    fn long_first_and_long_current_share_the_space() {
+        let names = [r"\\fileserver\departments", "Quarterly reports 2024"];
+        let width = 300.0;
+        let result = layout(&names, width);
+
+        assert_eq!(result.segments.len(), 2);
+        assert!(result.segments.iter().all(|c| c.truncated));
+        assert!(result.segments[1].width >= (width - SEPARATOR) / 2.0 - CHAR_WIDTH);
+        assert!(total_width(&result) <= width);
+    }
+
+    #[test]
+    fn short_first_crumb_is_never_truncated() {
+        for width in [0.0, 30.0, 60.0, 100.0] {
+            let result = layout(&["C:", "Users", "Quarterly reports 2024"], width);
+
+            assert_eq!(result.segments[0].label, "C:", "width {width}");
+            assert!(result.segments.last().unwrap().truncated, "width {width}");
+        }
+    }
+
+    #[test]
+    fn layout_fits_whenever_minimal_form_fits() {
+        let minimal = width_of(&["C:", BREADCRUMB_ELLIPSIS, "E..."]);
+
+        for step in 0..=60 {
+            let width = minimal + step as f32 * 5.0;
+            let result = layout(&DEEP, width);
+
+            assert!(total_width(&result) <= width, "width {width}");
+            assert_eq!(result.segments.first().unwrap().label, "C:");
+            assert_eq!(result.segments.last().unwrap().full_label, "Eden");
+
+            // First crumb + omitted + visible ancestors + current rebuild the whole path.
+            let mut visible: Vec<&str> = result
+                .segments
+                .iter()
+                .filter(|c| !c.is_ellipsis)
+                .map(|c| c.full_label.as_str())
+                .collect();
+            let rest = visible.split_off(1);
+            visible.extend(omitted_labels(&result));
+            visible.extend(rest);
+            assert_eq!(visible, DEEP, "width {width}");
+        }
+    }
+
+    #[test]
+    fn truncation_finds_longest_fitting_prefix() {
+        let text = "Quarterly reports 2024";
+
+        for max_width in [40.0, 55.0, 90.0, 150.0, 210.0] {
+            let (label, width) = truncate_label_to_width(text, max_width, &measure).unwrap();
+            let expected = (1..text.chars().count())
+                .rev()
+                .map(|n| {
+                    let prefix: String = text.chars().take(n).collect();
+                    format!("{}{BREADCRUMB_ELLIPSIS}", prefix.trim_end())
+                })
+                .find(|candidate| measure(candidate) <= max_width)
+                .unwrap_or_else(|| format!("Q{BREADCRUMB_ELLIPSIS}"));
+
+            assert_eq!(label, expected, "max width {max_width}");
+            assert_eq!(width, measure(&label));
+        }
+    }
+
+    #[test]
+    fn truncation_keeps_one_char_and_handles_multibyte() {
+        // Japanese for "document": six 3-byte chars.
+        let text = "\u{30c9}\u{30ad}\u{30e5}\u{30e1}\u{30f3}\u{30c8}";
+
+        let (label, _) = truncate_label_to_width(text, 0.0, &measure).unwrap();
+        assert_eq!(label, "\u{30c9}...");
+
+        let (label, _) = truncate_label_to_width(text, 60.0, &measure).unwrap();
+        assert_eq!(label, "\u{30c9}\u{30ad}\u{30e5}...");
+
+        assert!(truncate_label_to_width("X", 0.0, &measure).is_none());
+    }
+
+    #[test]
+    fn truncation_uses_logarithmic_measurements() {
+        let text = "x".repeat(1024);
+        let calls = Cell::new(0);
+        let counting = |s: &str| {
+            calls.set(calls.get() + 1);
+            measure(s)
+        };
+
+        truncate_label_to_width(&text, 5000.0, &counting).unwrap();
+
+        assert!(calls.get() <= 11, "{} measurements", calls.get());
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn builds_drive_and_unc_breadcrumbs() {
+        let drive = build_breadcrumbs(Path::new(r"C:\Users\someone"));
+        let drive: Vec<_> = drive
+            .iter()
+            .map(|c| (c.label.as_str(), c.path.clone()))
+            .collect();
+        assert_eq!(
+            drive,
+            [
+                ("C:", PathBuf::from("C:")),
+                ("Users", PathBuf::from(r"C:\Users")),
+                ("someone", PathBuf::from(r"C:\Users\someone")),
+            ]
+        );
+
+        let unc = build_breadcrumbs(Path::new(r"\\server\share\dir"));
+        let unc: Vec<_> = unc.iter().map(|c| c.label.as_str()).collect();
+        assert_eq!(unc, [r"\\server\share", "dir"]);
+
+        assert_eq!(build_breadcrumbs(Path::new(r"C:\")).len(), 1);
+    }
 }
