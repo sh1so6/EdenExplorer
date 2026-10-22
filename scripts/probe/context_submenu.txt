@@ -1,0 +1,46 @@
+# Shell context menu submenus (compat/egui mode, the default).
+# Run directly with a scratch folder as launch path (ui-probe.ps1 passes no
+# args), e.g. from bash:
+#   mkdir -p "$TEMP/eden-ctx-scratch/sub folder"; echo hi > "$TEMP/eden-ctx-scratch/notes.txt"
+#   EDEN_PROBE_SCRIPT=<abs path of this file> EDEN_PROBE_DATA_DIR=<scratch data dir> \
+#     target/probe/release/EdenExplorer.exe "%TEMP%\eden-ctx-scratch" 2> stderr.log
+# stderr receives "[shell-menu]" timing lines (debug / ui-probe builds only).
+# Row 2 (y=124) is notes.txt. Coordinates assume the Japanese shell menu of
+# the dev machine; only hovers, never clicks a shell command.
+size 1117 717
+wait_ms 1200
+click 340 124 right
+wait_ms 500
+shot out/ctx_1_menu.png
+
+# Scroll the (long) context menu to the shell part.
+move 450 450
+wheel -2000
+wait_ms 300
+shot out/ctx_2_menu_scrolled.png
+
+# "送る" / "Send to": lazily populated submenu.
+move 400 373
+wait_ms 400
+shot out/ctx_3_sendto.png
+
+# "プログラムから開く" / "Open with".
+move 400 180
+wait_ms 400
+shot out/ctx_4_openwith.png
+
+# "アクセスを許可する" / "Give access to".
+move 400 211
+wait_ms 400
+shot out/ctx_5_access.png
+
+# Folder row: right-click "sub folder" (y=104).
+key Escape
+wait_ms 200
+click 340 104 right
+wait_ms 500
+move 450 450
+wheel -2000
+wait_ms 300
+shot out/ctx_6_folder_menu.png
+quit
