@@ -21,7 +21,15 @@ pub const VERTICAL_TABS_MAX_WIDTH: f32 = 400.0;
 pub const VERTICAL_TABS_DEFAULT_WIDTH: f32 = 200.0;
 const VERTICAL_TAB_ROW_HEIGHT: f32 = 30.0;
 const VERTICAL_TABS_HEADER_HEIGHT: f32 = 28.0;
-const VERTICAL_TABS_PADDING: f32 = 4.0;
+/// Gap between the rail edges and its rows/button (inactive rows keep it on the right too).
+const VERTICAL_TABS_INSET: f32 = 6.0;
+/// Horizontal padding inside a row before the icon (leaves room for the active accent bar).
+const VERTICAL_TAB_ROW_PADDING: f32 = 10.0;
+/// How far the rail background moves from the app background towards the text color.
+const VERTICAL_TABS_RAIL_TINT: f32 = 0.04;
+/// Keeps the floating scroll bar (and its hit area) off the right divider, whose resize
+/// handle reaches 3px into the rail, and away from the active row's opening.
+const VERTICAL_TABS_SCROLLBAR_MARGIN: f32 = 4.0;
 
 /// Pointer/drag state shared by the horizontal and vertical tab strips to decide
 /// whether dragged files are hovering a tab and should be dropped into its folder.
@@ -285,7 +293,52 @@ pub fn draw_tabs(
     action
 }
 
-/// Draws the tab list as a vertical panel that fills `ui.max_rect()`.
+/// Background of the vertical tab rail: the app background nudged slightly towards the text
+/// color, so the rail reads as its own layer next to the sidebar and content in both themes.
+fn vertical_tabs_rail_fill(palette: &ThemePalette) -> egui::Color32 {
+    lerp_opaque(
+        palette.application_bg_color,
+        palette.text_normal,
+        VERTICAL_TABS_RAIL_TINT,
+    )
+}
+
+/// Blends two colors channel-wise in gamma space and returns an opaque result
+/// (`t = 0` gives `from`, `t = 1` gives `to`).
+fn lerp_opaque(from: egui::Color32, to: egui::Color32, t: f32) -> egui::Color32 {
+    let mix = |a: u8, b: u8| (a as f32 + (b as f32 - a as f32) * t).round() as u8;
+    egui::Color32::from_rgb(
+        mix(from.r(), to.r()),
+        mix(from.g(), to.g()),
+        mix(from.b(), to.b()),
+    )
+}
+
+/// 1px `borders_default` stroke, pre-composited onto the app background.
+///
+/// `borders_default` is translucent, so drawing it over the tinted rail (or twice where edges
+/// meet) would change its shade. The opaque equivalent matches the sidebar border exactly.
+fn vertical_tabs_border_stroke(palette: &ThemePalette) -> egui::Stroke {
+    let fg = palette.borders_default; // premultiplied
+    let bg = palette.application_bg_color;
+    let keep = 1.0 - fg.a() as f32 / 255.0;
+    let over = |f: u8, b: u8| (f as f32 + b as f32 * keep).round().min(255.0) as u8;
+    egui::Stroke::new(
+        1.0,
+        egui::Color32::from_rgb(
+            over(fg.r(), bg.r()),
+            over(fg.g(), bg.g()),
+            over(fg.b(), bg.b()),
+        ),
+    )
+}
+
+/// Draws the tab list as a vertical rail that fills `ui.max_rect()`.
+///
+/// The rail has a tinted background, a top edge and a divider on its right towards the
+/// content. The divider is left open where the active row is, so the active tab visually
+/// connects to the content it owns. `draw_left_border` adds a left edge; it is off when the
+/// rail sits directly against the sidebar border.
 ///
 /// Returns the same `TabsAction` as the horizontal strip (minus scrolling, which the
 /// panel's own `ScrollArea` handles) so both modes share `handle_tabs_action`.
@@ -298,28 +351,49 @@ pub fn draw_vertical_tabs(
     scroll_to_id: Option<u64>,
     drag_active: bool,
     drag_hover_target: Option<PathBuf>,
+    draw_left_border: bool,
 ) -> TabsAction {
     let mut action = TabsAction::default();
     let drop_ctx = TabDropContext::new(ui, drag_active, drag_hover_target.as_ref());
     let mut tab_drop_target: Option<PathBuf> = None;
 
     let panel_rect = ui.max_rect();
-    ui.painter().rect_stroke(
-        panel_rect,
-        0.0,
-        egui::Stroke::new(1.0, palette.borders_default),
-        egui::StrokeKind::Inside,
-    );
+    let border = vertical_tabs_border_stroke(palette);
+    let rail_fill = vertical_tabs_rail_fill(palette);
+    let painter = ui.painter().clone();
+    painter.rect_filled(panel_rect, 0.0, rail_fill);
+    painter.hline(panel_rect.x_range(), panel_rect.top() + 0.5, border);
+    let inner_left = if draw_left_border {
+        painter.vline(panel_rect.left() + 0.5, panel_rect.y_range(), border);
+        panel_rect.left() + 1.0
+    } else {
+        panel_rect.left()
+    };
 
-    let content_rect = panel_rect.shrink(VERTICAL_TABS_PADDING);
+    // Rows run all the way to the right edge (the divider); only the active row uses that
+    // last stretch, inactive rows keep `VERTICAL_TABS_INSET` clear of it.
+    let content_rect = egui::Rect::from_min_max(
+        egui::pos2(
+            inner_left + VERTICAL_TABS_INSET,
+            panel_rect.top() + 1.0 + VERTICAL_TABS_INSET,
+        ),
+        panel_rect.max - egui::vec2(0.0, VERTICAL_TABS_INSET),
+    );
+    let mut active_row_rect: Option<egui::Rect> = None;
     ui.scope_builder(
         egui::UiBuilder::new()
             .max_rect(content_rect)
-            .layout(egui::Layout::top_down(egui::Align::Min)),
+            .layout(egui::Layout::top_down(egui::Align::Min))
+            // Lets the ScrollArea's edge fades blend into the rail instead of the app bg.
+            .ui_stack_info(
+                egui::UiStackInfo::new(egui::UiKind::Frame)
+                    .with_frame(egui::Frame::NONE.fill(rail_fill)),
+            ),
         |ui| {
             handle_draw_vertical_new_tab_button(ui, i18n, palette, &mut action);
-            ui.add_space(VERTICAL_TABS_PADDING);
+            ui.add_space(VERTICAL_TABS_INSET);
 
+            ui.spacing_mut().scroll.bar_outer_margin = VERTICAL_TABS_SCROLLBAR_MARGIN;
             egui::ScrollArea::vertical()
                 .id_salt("vertical_tabs_scroll")
                 .auto_shrink([false, false])
@@ -337,6 +411,9 @@ pub fn draw_vertical_tabs(
 
                         // Rows scrolled out of view must not catch the pointer.
                         let visible_rect = rect.intersect(ui.clip_rect());
+                        if tab.id == active_id && visible_rect.is_positive() {
+                            active_row_rect = Some(visible_rect);
+                        }
                         let drop_hovered = drop_ctx.is_drop_hovered(tab, visible_rect, active_id);
                         if drop_hovered && drop_ctx.pointer_released {
                             tab_drop_target = Some(tab.full_path.clone());
@@ -358,6 +435,26 @@ pub fn draw_vertical_tabs(
         },
     );
 
+    // Divider towards the content, open where the active row joins the content area.
+    let divider_x = panel_rect.right() - 0.5;
+    let divider_top = panel_rect.top() + 1.0;
+    let divider_bottom = panel_rect.bottom();
+    match active_row_rect {
+        Some(active) => {
+            let gap_top = active.top().round().max(divider_top);
+            let gap_bottom = active.bottom().round().min(divider_bottom);
+            if gap_top > divider_top {
+                painter.vline(divider_x, divider_top..=gap_top, border);
+            }
+            if gap_bottom < divider_bottom {
+                painter.vline(divider_x, gap_bottom..=divider_bottom, border);
+            }
+        }
+        None => {
+            painter.vline(divider_x, divider_top..=divider_bottom, border);
+        }
+    }
+
     action.move_files_to_tab_dir = tab_drop_target;
     action
 }
@@ -369,31 +466,18 @@ fn handle_draw_vertical_new_tab_button(
     action: &mut TabsAction,
 ) {
     let label = i18n.tr("vertical_tabs_new_tab");
+    // Inset from the divider like inactive rows.
+    let width = (ui.available_width() - VERTICAL_TABS_INSET).max(0.0);
     let (rect, resp) = ui.allocate_exact_size(
-        egui::vec2(ui.available_width(), VERTICAL_TABS_HEADER_HEIGHT),
+        egui::vec2(width, VERTICAL_TABS_HEADER_HEIGHT),
         egui::Sense::click(),
     );
     resp.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, true, &label));
 
     let rect = egui::Rect::from_min_max(rect.min.round(), rect.max.round());
     let hovered = resp.hovered();
-    let rounding = egui::CornerRadius::same(palette.medium_radius);
 
-    let (fill, stroke, icon_color) = if hovered {
-        (
-            ui.visuals().widgets.hovered.bg_fill,
-            egui::Stroke::new(1.0, palette.borders_active),
-            palette.icon_colored_hover,
-        )
-    } else {
-        (
-            egui::Color32::TRANSPARENT,
-            egui::Stroke::new(1.0, palette.borders_default),
-            palette.icon_color,
-        )
-    };
-
-    let padding = 8.0;
+    let padding = VERTICAL_TAB_ROW_PADDING;
     let spacing = 6.0;
     let font_id = FontId::new(palette.text_size, FontFamily::Proportional);
     let icon_font_id = FontId::new(palette.tab_icon_size, FontFamily::Proportional);
@@ -402,14 +486,20 @@ fn handle_draw_vertical_new_tab_button(
         truncate_item_text(ui, &label, text_width, &font_id, palette.text_normal);
 
     let painter = ui.painter();
-    painter.rect_filled(rect, rounding, fill);
-    painter.rect_stroke(rect, rounding, stroke, egui::StrokeKind::Inside);
+    // Flat like the rows below it: only a hover fill, no border.
+    if hovered {
+        painter.rect_filled(
+            rect,
+            egui::CornerRadius::same(palette.medium_radius),
+            ui.visuals().widgets.hovered.bg_fill,
+        );
+    }
     painter.text(
         egui::pos2(rect.left() + padding, rect.center().y),
         egui::Align2::LEFT_CENTER,
         regular::PLUS,
         icon_font_id,
-        icon_color,
+        palette.icon_color,
     );
     painter.text(
         egui::pos2(
@@ -431,6 +521,7 @@ fn handle_draw_vertical_new_tab_button(
     }
 }
 
+/// Draws one row of the vertical tab rail. `rect` spans up to the rail's right divider.
 fn handle_draw_vertical_tab_row(
     ui: &mut egui::Ui,
     i18n: &I18n,
@@ -444,13 +535,18 @@ fn handle_draw_vertical_tab_row(
 ) {
     let is_active = tab.id == active_id;
     let rect = egui::Rect::from_min_max(rect.min.round(), rect.max.round());
+    // Inactive rows (and every row's text/close button) stay clear of the divider; only the
+    // active row's background runs into it.
+    let item_rect = rect.with_max_x(rect.right() - VERTICAL_TABS_INSET);
     // Includes hovering the pin/close buttons, which sit on top of the row response.
     let row_hovered = ui.rect_contains_pointer(rect);
 
     let font_id = FontId::new(palette.text_size, FontFamily::Proportional);
     let icon_font_id = FontId::new(palette.tab_icon_size, FontFamily::Proportional);
+    // The active row sits on the content background, not on the accent fill used by the
+    // horizontal strip, so it uses regular (slightly stronger) text colors.
     let label_color = if is_active {
-        palette.tab_text_selected
+        palette.text_header_section
     } else {
         palette.text_normal
     };
@@ -462,10 +558,13 @@ fn handle_draw_vertical_tab_row(
 
     let icon_size = palette.tab_icon_size;
     let spacing = 6.0;
-    let padding = 8.0;
+    let padding = VERTICAL_TAB_ROW_PADDING;
     let close_button_width = 20.0;
     let icon_rect = egui::Rect::from_min_size(
-        egui::pos2(rect.left() + padding, rect.center().y - icon_size * 0.5),
+        egui::pos2(
+            item_rect.left() + padding,
+            item_rect.center().y - icon_size * 0.5,
+        ),
         egui::vec2(icon_size, icon_size),
     );
 
@@ -489,33 +588,57 @@ fn handle_draw_vertical_tab_row(
         .x;
     let icon_draw_width = icon_size.max(icon_glyph_width);
     let text_pos = egui::pos2(
-        rect.left() + padding + icon_draw_width + spacing,
-        rect.center().y,
+        item_rect.left() + padding + icon_draw_width + spacing,
+        item_rect.center().y,
     );
     // Space for the close button is always reserved so titles don't reflow on hover.
-    let text_width = rect.width() - icon_draw_width - spacing - 2.0 * padding - close_button_width;
+    let text_width =
+        item_rect.width() - icon_draw_width - spacing - 2.0 * padding - close_button_width;
     let (display_title, truncated) =
         truncate_item_text(ui, &tab.title, text_width, &font_id, label_color);
 
-    let fill = if drop_hovered {
-        palette.primary_hover
-    } else if is_active {
-        ui.visuals().widgets.active.bg_fill
-    } else if row_hovered {
-        ui.visuals().widgets.hovered.bg_fill
-    } else {
-        egui::Color32::TRANSPARENT
-    };
-    let rounding = egui::CornerRadius::same(palette.medium_radius);
-
     let painter = ui.painter();
-    painter.rect_filled(rect, rounding, fill);
     if is_active {
-        painter.rect_stroke(
-            rect,
-            rounding,
-            egui::Stroke::new(1.0, palette.borders_active),
+        // Tab shape on the content background, open towards the content: rounded on the
+        // left, top/bottom edges running into the divider, no right edge.
+        let radius = palette.medium_radius;
+        let corners = egui::CornerRadius {
+            nw: radius,
+            ne: 0,
+            sw: radius,
+            se: 0,
+        };
+        painter.rect_filled(rect, corners, palette.application_bg_color);
+        let open_right_clip = painter
+            .clip_rect()
+            .intersect(egui::Rect::EVERYTHING.with_max_x(rect.right()));
+        painter.with_clip_rect(open_right_clip).rect_stroke(
+            rect.with_max_x(rect.right() + 8.0),
+            corners,
+            vertical_tabs_border_stroke(palette),
             egui::StrokeKind::Inside,
+        );
+        let accent_rect = egui::Rect::from_min_max(
+            egui::pos2(rect.left() + 2.0, rect.top() + 7.0),
+            egui::pos2(rect.left() + 5.0, rect.bottom() - 7.0),
+        );
+        painter.rect_filled(
+            accent_rect,
+            egui::CornerRadius::same(palette.small_radius),
+            palette.primary,
+        );
+    } else {
+        let fill = if drop_hovered {
+            palette.primary_hover
+        } else if row_hovered {
+            ui.visuals().widgets.hovered.bg_fill
+        } else {
+            egui::Color32::TRANSPARENT
+        };
+        painter.rect_filled(
+            item_rect,
+            egui::CornerRadius::same(palette.medium_radius),
+            fill,
         );
     }
     painter.text(
@@ -533,8 +656,12 @@ fn handle_draw_vertical_tab_row(
         label_color,
     );
 
+    // Shifted left a little so the button stays clear of the scroll bar's hit area.
+    // `is_active = false`: the close glyph's "active" color is meant for the accent fill of
+    // horizontal tabs and would be unreadable on the content background.
+    let close_anchor = item_rect.with_max_x(item_rect.right() - 2.0);
     let close_clicked = if is_active || row_hovered {
-        tab_close_button(ui, rect, tab.id, is_active, palette).clicked()
+        tab_close_button(ui, close_anchor, tab.id, false, palette).clicked()
     } else {
         false
     };

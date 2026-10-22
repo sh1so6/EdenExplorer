@@ -38,6 +38,7 @@ use crate::gui::windows::windowsoverrides::{
     handle_draw_windows_buttons, install_wndproc,
 };
 use eframe::egui;
+use eframe::egui::emath::GuiRounding as _;
 use std::collections::HashMap;
 use std::collections::HashSet;
 use std::path::PathBuf;
@@ -487,6 +488,9 @@ impl eframe::App for MainWindow {
 
                         let sidebar_frame = egui::Frame::NONE
                             .stroke(egui::Stroke::new(1.0, palette.borders_default));
+                        // Outer rect of the bordered sidebar frame (None when collapsed); the
+                        // vertical tab rail attaches to its right border.
+                        let mut sidebar_frame_rect: Option<egui::Rect> = None;
 
                         ui.allocate_ui_with_layout(
                             egui::vec2(sidebar_width, ui.available_height() + 15.5),
@@ -507,7 +511,7 @@ impl eframe::App for MainWindow {
                                     ));
                                 });
                                 if !self.sidebar_collapsed {
-                                    sidebar_frame.show(ui, |ui| {
+                                    let frame_response = sidebar_frame.show(ui, |ui| {
                                         sidebar_action = Some(draw_sidebar(
                                             ui,
                                             &self.i18n,
@@ -518,6 +522,7 @@ impl eframe::App for MainWindow {
                                             drag_hover_target.clone(),
                                         ));
                                     });
+                                    sidebar_frame_rect = Some(frame_response.response.rect);
                                 }
                             },
                         );
@@ -681,10 +686,23 @@ impl eframe::App for MainWindow {
                                     // -------------------------
                                     let mut content_rect: Option<egui::Rect> = None;
                                     if vertical_tabs {
-                                        const PANEL_GAP: f32 = 4.0;
                                         const CONTENT_MIN_WIDTH: f32 = 200.0;
                                         let area = ui.available_rect_before_wrap();
-                                        let max_width = (area.width() - PANEL_GAP - CONTENT_MIN_WIDTH)
+                                        // With the sidebar expanded the rail starts right at the
+                                        // sidebar's right border (sharing that single line) and its
+                                        // top lines up with the sidebar's top border. Collapsed, it
+                                        // starts at the column and draws its own left edge.
+                                        // Edges are snapped to physical pixels like egui does for
+                                        // the sidebar frame, so the shared line stays crisp at any DPI.
+                                        let ppp = ui.ctx().pixels_per_point();
+                                        let (panel_left, panel_top) = match sidebar_frame_rect {
+                                            Some(sidebar) => (
+                                                sidebar.right().round_to_pixels(ppp).min(area.left()),
+                                                sidebar.top().round_to_pixels(ppp).min(area.top()),
+                                            ),
+                                            None => (area.left(), area.top()),
+                                        };
+                                        let max_width = (area.right() - panel_left - CONTENT_MIN_WIDTH)
                                             .min(VERTICAL_TABS_MAX_WIDTH)
                                             .max(VERTICAL_TABS_MIN_WIDTH);
                                         let panel_width = self
@@ -692,9 +710,12 @@ impl eframe::App for MainWindow {
                                             .current_settings
                                             .vertical_tabs_width
                                             .clamp(VERTICAL_TABS_MIN_WIDTH, max_width);
-                                        let panel_rect = egui::Rect::from_min_size(
-                                            area.min,
-                                            egui::vec2(panel_width, area.height()),
+                                        let panel_rect = egui::Rect::from_min_max(
+                                            egui::pos2(panel_left, panel_top),
+                                            egui::pos2(
+                                                (panel_left + panel_width).round_to_pixels(ppp),
+                                                area.bottom(),
+                                            ),
                                         );
 
                                         let scroll_to_id = self.pending_tab_scroll_id;
@@ -710,6 +731,7 @@ impl eframe::App for MainWindow {
                                                     scroll_to_id,
                                                     drag_active,
                                                     drag_hover_target.clone(),
+                                                    sidebar_frame_rect.is_none(),
                                                 ));
                                             },
                                         );
@@ -717,7 +739,8 @@ impl eframe::App for MainWindow {
                                             self.pending_tab_scroll_id = None;
                                         }
 
-                                        let separator_x = panel_rect.right() + PANEL_GAP / 2.0;
+                                        // Centered on the rail's 1px right divider.
+                                        let separator_x = panel_rect.right() - 0.5;
                                         let separator_rect = egui::Rect::from_center_size(
                                             egui::pos2(separator_x, panel_rect.center().y),
                                             egui::vec2(6.0, panel_rect.height()),
@@ -755,8 +778,9 @@ impl eframe::App for MainWindow {
                                             save_layout_settings = true;
                                         }
 
+                                        // The content container adds its own 3px left margin.
                                         content_rect = Some(egui::Rect::from_min_max(
-                                            egui::pos2(panel_rect.right() + PANEL_GAP, area.top()),
+                                            egui::pos2(panel_rect.right(), area.top()),
                                             area.max,
                                         ));
                                     }
