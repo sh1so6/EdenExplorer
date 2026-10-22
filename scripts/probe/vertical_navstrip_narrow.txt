@@ -1,0 +1,13 @@
+# Vertical tabs, narrow windows: a strip address bar would be narrower than
+# NAVBAR_MIN_STRIP_WIDTH, so the bars fall back into the panes.
+# Run with -Seed scripts/probe/seed_vertical_tabs (scratch folder: see vertical_navstrip.txt).
+size 1117 717
+wait_ms 1200
+key D alt
+text %TEMP%\eden-nav-scratch
+key Enter
+wait_ms 800
+shot out/navstrip_narrow_0_unsplit_in_strip.png
+click 155 18
+wait_ms 800
+shot out/navstrip_narrow_1_split_fallback.png

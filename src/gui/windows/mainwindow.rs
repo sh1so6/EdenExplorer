@@ -12,6 +12,7 @@ use crate::gui::theme::{
 use crate::gui::utils::{SortColumn, sort_files_by_keys};
 use crate::gui::windows::containers::enums::ItemViewerAction;
 use crate::gui::windows::containers::explorer::draw_tab_content;
+use crate::gui::windows::containers::itemviewer_navbar::NAVBAR_MIN_STRIP_WIDTH;
 use crate::gui::windows::containers::sidebar::draw_sidebar;
 use crate::gui::windows::containers::structs::{
     FavoriteItem, FileOpState, ItemViewerColumnState, ItemViewerFolderSizeState,
@@ -74,6 +75,9 @@ pub struct MainWindow {
     pub(crate) tab_scroll_offset: f32,
     pub(crate) pending_tab_scroll_id: Option<u64>,
     pub(crate) focused_split: SplitSide,
+    /// Vertical tabs mode: whether the address bars currently live in the
+    /// title-bar strip (false: too narrow, drawn inside the panes).
+    pub(crate) nav_strip_active: bool,
     pub(crate) next_tab_id: u64,
     pub(crate) folder_sizes: HashMap<PathBuf, ItemViewerFolderSizeState>,
     pub(crate) rename_state: Option<RenameState>,
@@ -211,6 +215,7 @@ impl Default for MainWindow {
             tab_scroll_offset: 0.0,
             pending_tab_scroll_id: None,
             focused_split: SplitSide::Primary,
+            nav_strip_active: true,
             next_tab_id,
             folder_sizes: HashMap::new(),
 
@@ -581,6 +586,9 @@ impl eframe::App for MainWindow {
                                 egui::Layout::top_down(egui::Align::Min),
                                 |ui| {
                                     let active_id = self.tabs[self.active_tab].id;
+                                    // Vertical tabs mode: title-bar strip area left of the
+                                    // window controls that hosts the address bar(s).
+                                    let mut nav_strip_rect: Option<egui::Rect> = None;
 
                                     egui::Frame::NONE.show(ui, |ui| {
                                         let topbar_rect = ui.allocate_exact_size(
@@ -595,25 +603,19 @@ impl eframe::App for MainWindow {
                                         let controls_width = 45.0 * 3.0;
 
                                         if vertical_tabs {
-                                            // Tabs live in the side panel below; the strip is
-                                            // only a title-bar drag area next to the controls.
+                                            // Tabs live in the side panel below; the strip
+                                            // left of the window controls holds the views'
+                                            // address bars (drawn with the content) and the
+                                            // title-bar drag areas around them.
                                             let controls_left =
                                                 ui.ctx().viewport_rect().right() - controls_width;
-                                            let drag_rect = egui::Rect::from_min_max(
+                                            nav_strip_rect = Some(egui::Rect::from_min_max(
                                                 topbar_rect.min,
                                                 egui::pos2(
                                                     controls_left.min(topbar_rect.right()),
                                                     topbar_rect.bottom(),
                                                 ),
-                                            );
-                                            if drag_rect.width() > 4.0 {
-                                                handle_window_drag_area(
-                                                    ui,
-                                                    drag_rect,
-                                                    ui.id().with("vertical_tabs_window_drag_area"),
-                                                    self.hwnd,
-                                                );
-                                            }
+                                            ));
                                         } else {
                                             let tabs_rect = egui::Rect::from_min_size(
                                                 topbar_rect.min + egui::vec2(0.0, 4.0),
@@ -811,6 +813,25 @@ impl eframe::App for MainWindow {
                                                 egui::vec2(secondary_width, split_height),
                                             );
 
+                                            // Vertical tabs mode: each pane's address bar sits in
+                                            // the title-bar strip above that pane.
+                                            let tab = &self.tabs[self.active_tab];
+                                            let editing = tab.primary_view.breadcrumb_path_editing
+                                                || tab
+                                                    .split_view
+                                                    .as_ref()
+                                                    .is_some_and(|v| v.breadcrumb_path_editing);
+                                            let nav_rects = layout_nav_strip(
+                                                ui,
+                                                nav_strip_rect,
+                                                [primary_rect, secondary_rect],
+                                                &mut self.nav_strip_active,
+                                                editing,
+                                                self.hwnd,
+                                            );
+                                            let primary_nav_rect = nav_rects.map(|[a, _]| a);
+                                            let secondary_nav_rect = nav_rects.map(|[_, b]| b);
+
                                             let (pointer_pos, primary_clicked) = ui.ctx().input(|i| {
                                                 (
                                                     i.pointer.interact_pos(),
@@ -820,8 +841,12 @@ impl eframe::App for MainWindow {
 
                                             if primary_clicked {
                                                 if let Some(pos) = pointer_pos {
-                                                    let in_primary = primary_rect.contains(pos);
-                                                    let in_secondary = secondary_rect.contains(pos);
+                                                    let in_primary = primary_rect.contains(pos)
+                                                        || primary_nav_rect
+                                                            .is_some_and(|r| r.contains(pos));
+                                                    let in_secondary = secondary_rect.contains(pos)
+                                                        || secondary_nav_rect
+                                                            .is_some_and(|r| r.contains(pos));
 
                                                     if in_primary {
                                                         self.focused_split = SplitSide::Primary;
@@ -904,6 +929,7 @@ impl eframe::App for MainWindow {
                                                                 &mut self.settings_window,
                                                                 &mut drop_targets,
                                                                 primary_focused,
+                                                                primary_nav_rect,
                                                             );
                                                             tabbar_action = a;
                                                             pending_action = b;
@@ -999,6 +1025,7 @@ impl eframe::App for MainWindow {
                                                                 &mut self.settings_window,
                                                                 &mut drop_targets,
                                                                 secondary_focused,
+                                                                secondary_nav_rect,
                                                             );
                                                             secondary_tabbar_action = a;
                                                             secondary_pending_action = b;
@@ -1022,6 +1049,18 @@ impl eframe::App for MainWindow {
                                                 });
                                             });
                                         } else {
+                                            let pane_rect = ui.available_rect_before_wrap();
+                                            let nav_rect = layout_nav_strip(
+                                                ui,
+                                                nav_strip_rect,
+                                                [pane_rect],
+                                                &mut self.nav_strip_active,
+                                                self.tabs[self.active_tab]
+                                                    .primary_view
+                                                    .breadcrumb_path_editing,
+                                                self.hwnd,
+                                            )
+                                            .map(|[nav]| nav);
                                             let tab_id = self.tabs[self.active_tab].id;
                                             let is_favorited =
                                                 self.sidebar_state.favorites.iter().any(|fav| {
@@ -1064,6 +1103,7 @@ impl eframe::App for MainWindow {
                                                 &mut self.settings_window,
                                                 &mut drop_targets,
                                                 true,
+                                                nav_rect,
                                             );
                                             tabbar_action = a;
                                             pending_action = b;
@@ -1478,5 +1518,126 @@ impl eframe::App for MainWindow {
     #[cfg(feature = "ui-probe")]
     fn raw_input_hook(&mut self, ctx: &egui::Context, raw_input: &mut egui::RawInput) {
         crate::core::probe::raw_input_hook(ctx, raw_input);
+    }
+}
+
+/// Vertical tabs mode: width of the title-bar drag area kept free directly
+/// left of the window controls, next to the address bar(s).
+const NAV_STRIP_DRAG_GAP: f32 = 48.0;
+/// Offset of the address bar from the top of the 32px strip; lines its icons
+/// up with the sidebar top bar icons in the same row. The bar's row is ~20px
+/// tall and fits the remaining 24px.
+const NAV_STRIP_NAVBAR_TOP: f32 = 8.0;
+/// Extra width required to move the address bars back into the strip after
+/// they fell back into the panes, so resizing near the limit does not flicker.
+const NAV_STRIP_HYSTERESIS: f32 = 16.0;
+
+/// Address bar rect in the vertical-tabs title-bar strip for a view drawn in
+/// `pane`: aligned to the pane's x range and ending before the drag gap.
+fn strip_navbar_rect(strip: egui::Rect, pane: egui::Rect) -> egui::Rect {
+    let right = pane
+        .right()
+        .min(strip.right() - NAV_STRIP_DRAG_GAP)
+        .max(pane.left());
+    egui::Rect::from_min_max(
+        egui::pos2(pane.left(), strip.top() + NAV_STRIP_NAVBAR_TOP),
+        egui::pos2(right, strip.bottom()),
+    )
+}
+
+/// Vertical tabs mode (`strip` is `Some`): places the address bars of the
+/// views drawn in `panes` into the title-bar strip and registers title-bar
+/// drag areas on the rest of the strip. Returns `None` (address bars stay in
+/// the panes, the whole strip is a drag area) when a bar would be narrower
+/// than `NAVBAR_MIN_STRIP_WIDTH`. `active` keeps that decision between frames
+/// for hysteresis; it is not changed while an address bar is being edited, so
+/// the edit field does not move (and lose focus) mid-edit.
+fn layout_nav_strip<const N: usize>(
+    ui: &mut egui::Ui,
+    strip: Option<egui::Rect>,
+    panes: [egui::Rect; N],
+    active: &mut bool,
+    editing: bool,
+    hwnd: Option<HWND>,
+) -> Option<[egui::Rect; N]> {
+    let strip = strip?;
+    let navbars = panes.map(|pane| strip_navbar_rect(strip, pane));
+    if !editing {
+        let min_width = navbars
+            .iter()
+            .map(|rect| rect.width())
+            .fold(f32::INFINITY, f32::min);
+        let required = if *active {
+            NAVBAR_MIN_STRIP_WIDTH
+        } else {
+            NAVBAR_MIN_STRIP_WIDTH + NAV_STRIP_HYSTERESIS
+        };
+        *active = min_width >= required;
+    }
+    let navbars = active.then_some(navbars);
+    if let Some(navbars) = &navbars {
+        // Split view: a separator like the one inside the bar keeps the
+        // primary breadcrumb from running into the secondary bar's buttons.
+        let stroke = ui.visuals().widgets.noninteractive.bg_stroke;
+        let height = ui.spacing().interact_size.y;
+        let painter = ui.painter().with_clip_rect(strip);
+        for pair in navbars.windows(2) {
+            let x = ((pair[0].right() + pair[1].left()) * 0.5).round() + 0.5;
+            painter.vline(x, pair[1].top()..=pair[1].top() + height, stroke);
+        }
+    }
+    draw_nav_strip_drag_areas(ui, strip, navbars.as_ref().map_or(&[], |n| n), hwnd);
+    navbars
+}
+
+/// Registers title-bar drag areas on the parts of `strip` not covered by the
+/// address bars in `navbars` (ordered left to right): the spans between and
+/// beside them, and the band above each bar.
+fn draw_nav_strip_drag_areas(
+    ui: &mut egui::Ui,
+    strip: egui::Rect,
+    navbars: &[egui::Rect],
+    hwnd: Option<HWND>,
+) {
+    let mut strip_ui = ui.new_child(
+        egui::UiBuilder::new()
+            .id_salt("vertical_tabs_window_drag_area")
+            .max_rect(strip),
+    );
+    strip_ui.set_clip_rect(strip);
+
+    let mut left = strip.left();
+    let span_ends = navbars
+        .iter()
+        .map(|nav| nav.left())
+        .chain(std::iter::once(strip.right()));
+    for (index, right) in span_ends.enumerate() {
+        let right = right.min(strip.right());
+        if right - left > 1.0 {
+            let id = strip_ui.id().with(index);
+            handle_window_drag_area(
+                &mut strip_ui,
+                egui::Rect::from_min_max(
+                    egui::pos2(left, strip.top()),
+                    egui::pos2(right, strip.bottom()),
+                ),
+                id,
+                hwnd,
+            );
+        }
+        if let Some(nav) = navbars.get(index) {
+            left = left.max(nav.right());
+        }
+    }
+
+    for (index, nav) in navbars.iter().enumerate() {
+        let band = egui::Rect::from_min_max(
+            egui::pos2(nav.left(), strip.top()),
+            egui::pos2(nav.right(), nav.top()),
+        );
+        if band.width() > 1.0 && band.height() > 1.0 {
+            let id = strip_ui.id().with(("above_navbar", index));
+            handle_window_drag_area(&mut strip_ui, band, id, hwnd);
+        }
     }
 }

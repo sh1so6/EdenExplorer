@@ -26,6 +26,10 @@ const STATUS_ICON_GAP: f32 = 4.0;
 
 /// Draws one view's breadcrumb + item viewer + status bar (the content of
 /// either half of a split tab, or the whole content area for an unsplit tab).
+///
+/// `navbar_rect`: `None` draws the navigation bar as the first 30px row of
+/// the content. `Some(rect)` draws it into `rect` instead (vertical tabs mode
+/// places it in the title-bar strip) and the item viewer starts at the top.
 #[allow(clippy::too_many_arguments)]
 pub fn draw_tab_content(
     ui: &mut egui::Ui,
@@ -59,6 +63,7 @@ pub fn draw_tab_content(
     settings_window: &mut SettingsWindow,
     drop_targets: &mut DropTargets,
     is_focused: bool,
+    navbar_rect: Option<egui::Rect>,
 ) -> (Option<ItemViewerNavBarAction>, Option<ItemViewerAction>) {
     let viewport_width = ui.available_width();
     let is_drive_view = view.nav.is_root();
@@ -70,31 +75,59 @@ pub fn draw_tab_content(
 
     let font_id = egui::FontId::proportional(palette.text_size);
     let status_height = ui.fonts_mut(|f| f.row_height(&font_id)) + 2.0;
-    // approximate height of your breadcrumb/tabbar
-    let tabbar_height = 30.0;
+    // approximate height of your breadcrumb/tabbar (0 when drawn elsewhere)
+    let tabbar_height = if navbar_rect.is_some() { 0.0 } else { 30.0 };
 
     let old_spacing = ui.spacing().item_spacing.y;
     ui.spacing_mut().item_spacing.y = 0.0;
     let content_rect = ui.available_rect_before_wrap();
+
+    if let Some(rect) = navbar_rect {
+        // The caller's clip rect (e.g. a split pane) does not cover the strip;
+        // the navigation bar clips itself to its own max rect.
+        let mut navbar_ui = ui.new_child(
+            egui::UiBuilder::new()
+                .id_salt("strip_navbar")
+                .max_rect(rect)
+                .layout(egui::Layout::top_down(egui::Align::Min)),
+        );
+        tabbar_action = Some(draw_itemviewer_navigation_bar(
+            &mut navbar_ui,
+            i18n,
+            icon_cache,
+            view,
+            tab_id,
+            palette,
+            is_favorited,
+            drag_active,
+            drag_hover_target.clone(),
+        ));
+    }
 
     StripBuilder::new(ui)
         .size(Size::exact(tabbar_height)) // Tabbar
         .size(Size::remainder()) // Item viewer
         .size(Size::exact(status_height)) // Footer
         .vertical(|mut strip| {
-            strip.cell(|ui| {
-                tabbar_action = Some(draw_itemviewer_navigation_bar(
-                    ui,
-                    i18n,
-                    icon_cache,
-                    view,
-                    tab_id,
-                    palette,
-                    is_favorited,
-                    drag_active,
-                    drag_hover_target.clone(),
-                ));
-            });
+            if navbar_rect.is_some() {
+                // Keep the (empty) cell so the item viewer's cell, and with
+                // it every id inside, stays the same in both placements.
+                strip.empty();
+            } else {
+                strip.cell(|ui| {
+                    tabbar_action = Some(draw_itemviewer_navigation_bar(
+                        ui,
+                        i18n,
+                        icon_cache,
+                        view,
+                        tab_id,
+                        palette,
+                        is_favorited,
+                        drag_active,
+                        drag_hover_target.clone(),
+                    ));
+                });
+            }
 
             strip.cell(|ui| {
                 if view.display_mode == ItemViewerDisplayMode::Gallery {

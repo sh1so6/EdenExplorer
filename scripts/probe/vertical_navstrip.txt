@@ -1,0 +1,45 @@
+# Vertical tabs: address bars in the title-bar strip (wide window).
+# Split bars need >= NAVBAR_MIN_STRIP_WIDTH each, hence the wide window.
+# Run with -Seed scripts/probe/seed_vertical_tabs. Needs a scratch folder:
+#   mkdir -p "$TEMP/eden-nav-scratch/alpha folder/inner" "$TEMP/eden-nav-scratch/beta"
+#   echo hi > "$TEMP/eden-nav-scratch/file1.txt"
+# Coordinates assume the default sidebar (260) and vertical tab rail (200) widths.
+size 1920 1080
+wait_ms 1200
+# Alt+D: address bar edit mode in the strip.
+key D alt
+wait_ms 300
+shot out/navstrip_0_edit.png
+text %TEMP%\eden-nav-scratch
+key Enter
+wait_ms 800
+shot out/navstrip_1_unsplit.png
+# Back button in the strip (-> This PC), then forward.
+click 474 18
+wait_ms 800
+shot out/navstrip_2_back.png
+click 498 18
+wait_ms 800
+# Split: one address bar above each pane.
+click 155 18
+wait_ms 800
+shot out/navstrip_3_split.png
+# Empty spots (the bars' own separators) focus the pane below.
+click 681 18
+wait_ms 300
+shot out/navstrip_4_focus_primary.png
+click 1412 18
+wait_ms 300
+shot out/navstrip_5_focus_secondary.png
+# Alt+D edits the focused (secondary) bar.
+key D alt
+text %TEMP%\eden-nav-scratch\alpha folder
+key Enter
+wait_ms 800
+shot out/navstrip_6_secondary_nav.png
+# Band above the bars and the gap before the window controls are drag areas:
+# clicking them changes nothing.
+click 900 3
+click 1760 16
+wait_ms 300
+shot out/navstrip_7_drag_areas_click.png

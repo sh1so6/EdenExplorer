@@ -15,6 +15,12 @@ use egui_phosphor::{fill, regular};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
+/// Narrowest navigation bar worth showing in the vertical-tabs title-bar
+/// strip: the button group (~236px) plus ~164px of breadcrumb, enough for
+/// "root > ... > <typical folder name>". Narrower bars stay inside their pane
+/// instead. Update when buttons are added or removed.
+pub const NAVBAR_MIN_STRIP_WIDTH: f32 = 400.0;
+
 pub fn draw_itemviewer_navigation_bar(
     ui: &mut egui::Ui,
     i18n: &I18n,
