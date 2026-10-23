@@ -22,7 +22,7 @@ pub const VERTICAL_TABS_MIN_WIDTH: f32 = 120.0;
 pub const VERTICAL_TABS_MAX_WIDTH: f32 = 400.0;
 pub const VERTICAL_TABS_DEFAULT_WIDTH: f32 = 200.0;
 const VERTICAL_TAB_ROW_HEIGHT: f32 = 30.0;
-const VERTICAL_TABS_HEADER_HEIGHT: f32 = 28.0;
+const VERTICAL_TABS_HEADER_HEIGHT: f32 = 20.0;
 /// Gap between the rail's top/bottom edges and its rows/button; inactive rows and the
 /// button also keep it clear of the right divider.
 const VERTICAL_TABS_INSET: f32 = 6.0;
@@ -484,13 +484,8 @@ fn handle_draw_vertical_new_tab_button(
     let rect = egui::Rect::from_min_max(rect.min.round(), rect.max.round());
     let hovered = resp.hovered();
 
-    let padding = VERTICAL_TAB_ROW_PADDING;
-    let spacing = 6.0;
-    let font_id = FontId::new(palette.text_size, FontFamily::Proportional);
+    // A slim full-width strip with just the plus; the label is the tooltip.
     let icon_font_id = FontId::new(palette.tab_icon_size, FontFamily::Proportional);
-    let text_width = rect.width() - 2.0 * padding - palette.tab_icon_size - spacing;
-    let (display_label, _) =
-        truncate_item_text(ui, &label, text_width, &font_id, palette.text_normal);
 
     let painter = ui.painter();
     // Flat like the rows below it: only a hover fill, no border.
@@ -502,27 +497,18 @@ fn handle_draw_vertical_new_tab_button(
         );
     }
     painter.text(
-        egui::pos2(rect.left() + padding, rect.center().y),
-        egui::Align2::LEFT_CENTER,
+        rect.center(),
+        egui::Align2::CENTER_CENTER,
         regular::PLUS,
         icon_font_id,
         palette.icon_color,
-    );
-    painter.text(
-        egui::pos2(
-            rect.left() + padding + palette.tab_icon_size + spacing,
-            rect.center().y,
-        ),
-        egui::Align2::LEFT_CENTER,
-        display_label,
-        font_id,
-        palette.text_normal,
     );
 
     if hovered {
         ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
     }
 
+    let resp = resp.on_hover_text(label);
     if resp.clicked() {
         action.open_new = true;
     }
