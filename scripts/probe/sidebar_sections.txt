@@ -1,0 +1,31 @@
+# Collapsible sidebar section headers (Places / Favorites / Storage).
+#   ./scripts/ui-probe.ps1 -Script scripts/probe/sidebar_sections.txt
+# Coordinates are egui points in a 1117x717 window (default sidebar width).
+size 1117 717
+wait_ms 800
+shot out/sidebar_sections_0_expanded.png
+
+# Hover the Storage header: hover fill + caret.
+move 120 271
+shot out/sidebar_sections_1_hover_storage.png
+
+# Collapse Storage: drive list disappears.
+click 120 271
+shot out/sidebar_sections_2_storage_collapsed.png
+
+# Collapse Favorites: Storage header moves up.
+click 120 153
+move 600 600
+shot out/sidebar_sections_3_favorites_collapsed.png
+
+# Collapse Places too.
+click 120 53
+move 600 600
+shot out/sidebar_sections_4_all_collapsed.png
+
+# Expand everything again (headers now at 53 / 75 / 97 roughly).
+click 120 53
+click 120 153
+move 600 600
+shot out/sidebar_sections_5_places_favorites_expanded.png
+quit

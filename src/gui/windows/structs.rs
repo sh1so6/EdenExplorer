@@ -93,6 +93,87 @@ pub struct SidebarState {
     pub cached_drives: Vec<DriveInfo>,
     pub last_drive_refresh: Instant,
     pub non_ntfs_popup_path: Option<PathBuf>,
+    /// Collapsed sidebar sections, persisted in `sidebar.json`.
+    pub collapsed_sections: SidebarCollapsedSections,
+    /// Collapsed section header currently hovered by a file drag, and since
+    /// when (spring-loaded expansion).
+    pub spring_hover: Option<(SidebarSection, Instant)>,
+}
+
+/// A collapsible sidebar section.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SidebarSection {
+    Places,
+    Favorites,
+    Storage,
+}
+
+impl SidebarSection {
+    pub const ALL: [SidebarSection; 3] = [
+        SidebarSection::Places,
+        SidebarSection::Favorites,
+        SidebarSection::Storage,
+    ];
+
+    /// Stable key used in `sidebar.json` (also the header's i18n key).
+    pub fn key(self) -> &'static str {
+        match self {
+            SidebarSection::Places => "places",
+            SidebarSection::Favorites => "favorites",
+            SidebarSection::Storage => "storage",
+        }
+    }
+
+    pub fn from_key(key: &str) -> Option<Self> {
+        Self::ALL.into_iter().find(|section| section.key() == key)
+    }
+}
+
+/// Collapsed state of the sidebar sections. Default: all expanded.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct SidebarCollapsedSections {
+    places: bool,
+    favorites: bool,
+    storage: bool,
+}
+
+impl SidebarCollapsedSections {
+    /// Builds the state from persisted keys; unknown keys are ignored.
+    pub fn from_keys<S: AsRef<str>>(keys: &[S]) -> Self {
+        let mut collapsed = Self::default();
+        for section in keys
+            .iter()
+            .filter_map(|k| SidebarSection::from_key(k.as_ref()))
+        {
+            collapsed.set(section, true);
+        }
+        collapsed
+    }
+
+    /// Keys of the collapsed sections, in display order.
+    pub fn to_keys(self) -> Vec<String> {
+        SidebarSection::ALL
+            .into_iter()
+            .filter(|section| self.is_collapsed(*section))
+            .map(|section| section.key().to_string())
+            .collect()
+    }
+
+    pub fn is_collapsed(self, section: SidebarSection) -> bool {
+        match section {
+            SidebarSection::Places => self.places,
+            SidebarSection::Favorites => self.favorites,
+            SidebarSection::Storage => self.storage,
+        }
+    }
+
+    pub fn set(&mut self, section: SidebarSection, collapsed: bool) {
+        match section {
+            SidebarSection::Places => self.places = collapsed,
+            SidebarSection::Favorites => self.favorites = collapsed,
+            SidebarSection::Storage => self.storage = collapsed,
+        }
+    }
 }
 
 impl Default for SidebarState {
@@ -106,6 +187,37 @@ impl Default for SidebarState {
             cached_drives: Vec::new(),
             last_drive_refresh: now.checked_sub(Duration::from_secs(60)).unwrap_or(now),
             non_ntfs_popup_path: None,
+            collapsed_sections: SidebarCollapsedSections::default(),
+            spring_hover: None,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn sidebar_collapsed_sections_from_keys() {
+        let empty: [&str; 0] = [];
+        assert_eq!(
+            SidebarCollapsedSections::from_keys(&empty),
+            SidebarCollapsedSections::default()
+        );
+
+        let collapsed =
+            SidebarCollapsedSections::from_keys(&["storage", "bogus", "", "STORAGE", "places"]);
+        assert!(collapsed.is_collapsed(SidebarSection::Places));
+        assert!(!collapsed.is_collapsed(SidebarSection::Favorites));
+        assert!(collapsed.is_collapsed(SidebarSection::Storage));
+        assert_eq!(collapsed.to_keys(), vec!["places", "storage"]);
+
+        let mut collapsed = collapsed;
+        collapsed.set(SidebarSection::Places, false);
+        assert_eq!(collapsed.to_keys(), vec!["storage"]);
+        assert_eq!(
+            SidebarCollapsedSections::from_keys(&collapsed.to_keys()),
+            collapsed
+        );
     }
 }

@@ -915,6 +915,8 @@ pub struct SidebarAction {
     pub select_favorite: Option<PathBuf>,
     pub reorder: Option<(usize, usize)>, // from_idx, to_idx
     pub move_files_to_sidebar_dir: Option<PathBuf>,
+    /// A section was collapsed or expanded; persist `sidebar.json`.
+    pub sections_changed: bool,
 }
 
 #[derive(Default)]

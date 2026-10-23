@@ -45,7 +45,7 @@ optionally `EDEN_PROBE_DATA_DIR=<dir>`. Without `EDEN_PROBE_SCRIPT` a
 ## What probe mode changes
 
 - Data files (`settings.bin`, `theme.bin`, `tags.bin`, `layout.json`,
-  `favorites\`) live directly in the probe data dir.
+  `sidebar.json`, `favorites\`) live directly in the probe data dir.
 - No single-instance mutex and no path forwarding. The window title is
   `EdenExplorer Probe`, so a normal instance's forwarding
   (`FindWindowW("EdenExplorer")`) never targets it.

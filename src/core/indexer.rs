@@ -332,6 +332,10 @@ fn layout_settings_path() -> Option<PathBuf> {
     Some(app_data_dir()?.join("layout.json"))
 }
 
+fn sidebar_settings_path() -> Option<PathBuf> {
+    Some(app_data_dir()?.join("sidebar.json"))
+}
+
 fn tags_cache_path() -> Option<PathBuf> {
     Some(app_data_dir()?.join("tags.bin"))
 }
@@ -639,6 +643,46 @@ pub fn save_context_menu_settings(snapshot: &ContextMenuSettingsSnapshot) {
     }
 }
 
+/// Sidebar preferences, stored as JSON in `sidebar.json` (separate from the
+/// postcard `settings.bin`).
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct SidebarSettingsSnapshot {
+    /// Keys of collapsed sidebar sections (`places`, `favorites`, `storage`).
+    /// Unknown keys are ignored by the sidebar.
+    pub collapsed: Vec<String>,
+}
+
+/// Loads the sidebar preferences. Missing or unreadable files fall back to
+/// defaults (all sections expanded).
+pub fn load_sidebar_settings() -> SidebarSettingsSnapshot {
+    sidebar_settings_path()
+        .map(|path| load_sidebar_settings_from(&path))
+        .unwrap_or_default()
+}
+
+fn load_sidebar_settings_from(path: &std::path::Path) -> SidebarSettingsSnapshot {
+    std::fs::read_to_string(path)
+        .ok()
+        .and_then(|data| serde_json::from_str::<SidebarSettingsSnapshot>(&data).ok())
+        .unwrap_or_default()
+}
+
+pub fn save_sidebar_settings(snapshot: &SidebarSettingsSnapshot) {
+    if let Some(path) = sidebar_settings_path() {
+        save_sidebar_settings_to(&path, snapshot);
+    }
+}
+
+fn save_sidebar_settings_to(path: &std::path::Path, snapshot: &SidebarSettingsSnapshot) {
+    if let Some(parent) = path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    if let Ok(data) = serde_json::to_string_pretty(snapshot) {
+        let _ = std::fs::write(path, data);
+    }
+}
+
 pub fn load_theme_settings() -> Option<(ThemePalette, ThemePalette)> {
     let path = theme_cache_path()?;
 
@@ -796,5 +840,49 @@ mod tests {
         .unwrap();
         assert_eq!(snapshot.hidden, vec!["verb:open".to_string()]);
         assert!(snapshot.eden_hidden.is_empty());
+    }
+
+    #[test]
+    fn sidebar_settings_load_is_tolerant() {
+        let dir =
+            std::env::temp_dir().join(format!("eden-sidebar-settings-test-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let path = dir.join("sidebar.json");
+
+        // Missing file -> defaults (nothing collapsed).
+        assert_eq!(
+            load_sidebar_settings_from(&path),
+            SidebarSettingsSnapshot::default()
+        );
+
+        // Round trip (also creates the missing parent dir).
+        let snapshot = SidebarSettingsSnapshot {
+            collapsed: vec!["storage".to_string(), "favorites".to_string()],
+        };
+        save_sidebar_settings_to(&path, &snapshot);
+        assert_eq!(load_sidebar_settings_from(&path), snapshot);
+
+        // Corrupt file -> defaults.
+        std::fs::write(&path, "{ not json").unwrap();
+        assert_eq!(
+            load_sidebar_settings_from(&path),
+            SidebarSettingsSnapshot::default()
+        );
+
+        // Wrong types -> defaults.
+        std::fs::write(&path, r#"{ "collapsed": [1, 2] }"#).unwrap();
+        assert_eq!(
+            load_sidebar_settings_from(&path),
+            SidebarSettingsSnapshot::default()
+        );
+
+        // Missing / unknown fields are fine.
+        std::fs::write(&path, r#"{ "future": true }"#).unwrap();
+        assert_eq!(
+            load_sidebar_settings_from(&path),
+            SidebarSettingsSnapshot::default()
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

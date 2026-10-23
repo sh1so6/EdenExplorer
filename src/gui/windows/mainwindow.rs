@@ -1,5 +1,6 @@
 use crate::core::indexer::{
-    load_app_settings, load_favorites, load_layout_settings, load_tags, load_theme_settings,
+    load_app_settings, load_favorites, load_layout_settings, load_sidebar_settings, load_tags,
+    load_theme_settings,
 };
 use crate::core::launch::take_forwarded_paths;
 use crate::core::utils::tabs::update_tab_infos_cache;
@@ -32,7 +33,8 @@ use crate::gui::windows::mainwindow_imp::{
     handle_draw_customizetheme_window, handle_pending_actions, persist_directory_settings_snapshot,
 };
 use crate::gui::windows::structs::{
-    AboutWindow, AppSettings, Navigation, SettingsWindow, SidebarState, ThemeCustomizer,
+    AboutWindow, AppSettings, Navigation, SettingsWindow, SidebarCollapsedSections, SidebarState,
+    ThemeCustomizer,
 };
 use crate::gui::windows::windowsoverrides::{
     apply_window_override, apply_window_theme, consume_clipboard_dirty,
@@ -290,6 +292,8 @@ impl Default for MainWindow {
 
         app.theme_customizer.light_palette = get_palette(ThemeMode::Light);
         app.theme_customizer.dark_palette = get_palette(ThemeMode::Dark);
+        app.sidebar_state.collapsed_sections =
+            SidebarCollapsedSections::from_keys(&load_sidebar_settings().collapsed);
         let stored = load_favorites('C');
         if stored.is_empty() {
             app.sidebar_state.favorites = app.default_favorites();

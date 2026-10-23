@@ -2,8 +2,9 @@ use crate::core::drives::{get_drive_infos, is_raw_physical_drive_path};
 use crate::core::fs::{FileItem, get_shell_item_metadata};
 use crate::core::fs::{MY_PC_PATH, MY_RECYCLE_BIN_PATH, parallel_directory_scan, scan_dir_async};
 use crate::core::indexer::{
-    DirectorySettingsSnapshot, LayoutSettingsSnapshot, WindowSizeMode, load_app_settings,
-    save_app_settings, save_favorites, save_layout_settings, save_tags, save_theme_settings,
+    DirectorySettingsSnapshot, LayoutSettingsSnapshot, SidebarSettingsSnapshot, WindowSizeMode,
+    load_app_settings, save_app_settings, save_favorites, save_layout_settings,
+    save_sidebar_settings, save_tags, save_theme_settings,
 };
 use crate::gui::MainWindow;
 use crate::gui::i18n::I18n;
@@ -1901,6 +1902,11 @@ impl MainWindow {
         drag_sources: Option<&[PathBuf]>,
     ) {
         if let Some(action) = sidebar_action {
+            if action.sections_changed {
+                save_sidebar_settings(&SidebarSettingsSnapshot {
+                    collapsed: self.sidebar_state.collapsed_sections.to_keys(),
+                });
+            }
             if let Some((from, to)) = action.reorder {
                 let len = self.sidebar_state.favorites.len();
 
