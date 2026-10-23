@@ -396,8 +396,10 @@ pub fn draw_vertical_tabs(
                     .with_frame(egui::Frame::NONE.fill(rail_fill)),
             ),
         |ui| {
+            // Same gap below the new tab strip as between the rows (the theme's
+            // 8 px item spacing plus an inset made a 22 px hole here).
+            ui.spacing_mut().item_spacing.y = 2.0;
             handle_draw_vertical_new_tab_button(ui, i18n, palette, &mut action);
-            ui.add_space(VERTICAL_TABS_INSET);
 
             ui.spacing_mut().scroll.bar_outer_margin = VERTICAL_TABS_SCROLLBAR_MARGIN;
             egui::ScrollArea::vertical()
