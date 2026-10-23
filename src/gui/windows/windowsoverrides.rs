@@ -9,8 +9,8 @@ use eframe::egui;
 use egui::Context;
 use egui_phosphor::regular;
 use raw_window_handle::{HasWindowHandle, RawWindowHandle};
-use std::sync::RwLock;
 use std::sync::atomic::{AtomicBool, AtomicPtr, Ordering};
+use std::sync::{Mutex, RwLock};
 use windows::Win32::Foundation::HWND;
 use windows::Win32::Foundation::*;
 use windows::Win32::Graphics::Dwm::*;
@@ -92,6 +92,33 @@ pub fn mark_clipboard_dirty() {
     CLIPBOARD_DIRTY.store(true, Ordering::Release);
 }
 
+/// Last manual window size persisted by the window procedure
+/// ([`save_manual_window_size`]) that the app's in-memory settings have not
+/// picked up yet. Without it, any later `settings.bin` write from the app
+/// would put the stale startup size back.
+static MANUAL_WINDOW_SIZE: Mutex<Option<(f32, f32)>> = Mutex::new(None);
+
+fn record_manual_window_size(width: f32, height: f32) {
+    if let Ok(mut slot) = MANUAL_WINDOW_SIZE.lock() {
+        *slot = Some((width, height));
+    }
+}
+
+/// The window size saved by the window procedure since the last
+/// [`take_manual_window_size`], without consuming it.
+pub fn peek_manual_window_size() -> Option<WindowSizeMode> {
+    let slot = MANUAL_WINDOW_SIZE.lock().ok()?;
+    slot.map(|(width, height)| WindowSizeMode::Custom { width, height })
+}
+
+/// Takes the window size saved by the window procedure, if any, so the app
+/// can adopt it as its current window size setting.
+pub fn take_manual_window_size() -> Option<WindowSizeMode> {
+    let mut slot = MANUAL_WINDOW_SIZE.lock().ok()?;
+    slot.take()
+        .map(|(width, height)| WindowSizeMode::Custom { width, height })
+}
+
 fn save_manual_window_size(hwnd: HWND) {
     unsafe {
         // Never persist while maximized: the screen-filling dimensions must
@@ -135,6 +162,7 @@ fn save_manual_window_size(hwnd: HWND) {
             directory_settings,
         ) = load_app_settings();
         let window_size_mode = WindowSizeMode::Custom { width, height };
+        record_manual_window_size(width, height);
 
         save_app_settings(
             folder_scanning_enabled,
@@ -733,5 +761,27 @@ pub fn set_window_size_keep_origin(hwnd: HWND, width: f32, height: f32) {
             height.round() as i32,
             SWP_NOZORDER | SWP_NOACTIVATE,
         );
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn manual_window_size_slot_peek_then_take() {
+        record_manual_window_size(1234.0, 567.0);
+        record_manual_window_size(1300.0, 700.0);
+        let expect_latest = |mode: Option<WindowSizeMode>| {
+            assert!(matches!(
+                mode,
+                Some(WindowSizeMode::Custom { width, height }) if width == 1300.0 && height == 700.0
+            ));
+        };
+        expect_latest(peek_manual_window_size());
+        expect_latest(peek_manual_window_size());
+        expect_latest(take_manual_window_size());
+        assert!(peek_manual_window_size().is_none());
+        assert!(take_manual_window_size().is_none());
     }
 }

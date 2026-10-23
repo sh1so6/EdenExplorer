@@ -400,7 +400,25 @@ impl MainWindow {
         self.save_app_settings_to_disk();
     }
 
+    /// Adopts the window size the window procedure saved after a manual
+    /// resize, so the in-memory settings (and the settings dialog) match
+    /// `settings.bin`.
+    pub(crate) fn sync_manual_window_size(&mut self) {
+        if let Some(mode) = crate::gui::windows::windowsoverrides::take_manual_window_size() {
+            self.settings_window.current_settings.window_size_mode = mode;
+        }
+    }
+
     fn save_app_settings_to_disk(&self) {
+        // A manual resize is saved by the window procedure; prefer it over a
+        // not-yet-synced in-memory value so it is never overwritten here.
+        let window_size_mode = crate::gui::windows::windowsoverrides::peek_manual_window_size()
+            .unwrap_or_else(|| {
+                self.settings_window
+                    .current_settings
+                    .window_size_mode
+                    .clone()
+            });
         save_app_settings(
             self.settings_window
                 .current_settings
@@ -409,7 +427,7 @@ impl MainWindow {
                 .current_settings
                 .show_hidden_files_folders,
             self.settings_window.current_settings.show_item_viewer_icons,
-            &self.settings_window.current_settings.window_size_mode,
+            &window_size_mode,
             &self.settings_window.current_settings.start_path,
             Some(match self.theme {
                 ThemeMode::Dark => "dark",
@@ -450,11 +468,15 @@ impl MainWindow {
         self.save_layout_settings_to_disk();
     }
 
-    /// Persists layout preferences (vertical tabs) to `layout.json`.
+    /// Persists layout preferences (vertical tabs, rail and sidebar widths,
+    /// sidebar collapsed) to `layout.json`. Always built from the live state, so
+    /// saving one preference never resets another.
     pub(crate) fn save_layout_settings_to_disk(&self) {
         save_layout_settings(&LayoutSettingsSnapshot {
             vertical_tabs: self.settings_window.current_settings.vertical_tabs,
             vertical_tabs_width: self.settings_window.current_settings.vertical_tabs_width,
+            sidebar_width: self.sidebar_state.sidebar_default_width,
+            sidebar_collapsed: self.sidebar_collapsed,
         });
     }
 
@@ -1283,6 +1305,8 @@ impl MainWindow {
     fn cleanup_resources(&mut self) {
         println!("Cleaning up resources...");
 
+        self.sync_manual_window_size();
+
         if self.column_settings_save_due.take().is_some() {
             self.save_app_settings_to_disk();
         }
@@ -2008,6 +2032,7 @@ impl MainWindow {
             }
             if action.toggle_sidebar {
                 self.sidebar_collapsed = !self.sidebar_collapsed;
+                self.save_layout_settings_to_disk();
             }
             if action.toggle_active_tab_split {
                 self.toggle_split_for_active_tab();

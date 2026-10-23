@@ -2,6 +2,9 @@ use crate::core::fs::{DateStyle, MY_PC_PATH};
 use crate::gui::theme::{THEME_VERSION, ThemePalette, get_default_palette};
 use crate::gui::utils::SortKey;
 use crate::gui::windows::containers::enums::ItemViewerHeaderColumn;
+use crate::gui::windows::containers::sidebar::{
+    SIDEBAR_DEFAULT_WIDTH, SIDEBAR_MAX_WIDTH, SIDEBAR_MIN_WIDTH,
+};
 use crate::gui::windows::containers::structs::{GalleryThumbnailSize, ItemViewerDisplayMode};
 use crate::gui::windows::containers::tabs::{
     VERTICAL_TABS_DEFAULT_WIDTH, VERTICAL_TABS_MAX_WIDTH, VERTICAL_TABS_MIN_WIDTH,
@@ -562,11 +565,16 @@ pub fn save_app_settings(
 
 /// Layout preferences stored separately from `settings.bin` as self-describing JSON,
 /// so new fields can be added without invalidating the postcard settings file.
-#[derive(Clone, Debug, Serialize, Deserialize)]
+/// Missing fields (files written by older builds) take their default.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct LayoutSettingsSnapshot {
     pub vertical_tabs: bool,
     pub vertical_tabs_width: f32,
+    /// Preferred expanded sidebar width (points). Clamped to the window when drawn.
+    pub sidebar_width: f32,
+    /// Whether the sidebar is collapsed to its icon strip.
+    pub sidebar_collapsed: bool,
 }
 
 impl Default for LayoutSettingsSnapshot {
@@ -574,34 +582,66 @@ impl Default for LayoutSettingsSnapshot {
         Self {
             vertical_tabs: false,
             vertical_tabs_width: VERTICAL_TABS_DEFAULT_WIDTH,
+            sidebar_width: SIDEBAR_DEFAULT_WIDTH,
+            sidebar_collapsed: false,
         }
+    }
+}
+
+impl LayoutSettingsSnapshot {
+    /// Replaces non-finite values with defaults and keeps widths within their
+    /// absolute bounds. Window-dependent limits are applied at draw time only,
+    /// so a small first frame never shrinks the stored preference.
+    fn sanitized(mut self) -> Self {
+        self.vertical_tabs_width = sanitize_width(
+            self.vertical_tabs_width,
+            VERTICAL_TABS_MIN_WIDTH,
+            VERTICAL_TABS_MAX_WIDTH,
+            VERTICAL_TABS_DEFAULT_WIDTH,
+        );
+        self.sidebar_width = sanitize_width(
+            self.sidebar_width,
+            SIDEBAR_MIN_WIDTH,
+            SIDEBAR_MAX_WIDTH,
+            SIDEBAR_DEFAULT_WIDTH,
+        );
+        self
+    }
+}
+
+fn sanitize_width(width: f32, min: f32, max: f32, default: f32) -> f32 {
+    if width.is_finite() {
+        width.clamp(min, max)
+    } else {
+        default
     }
 }
 
 /// Loads layout preferences. Missing or unreadable files fall back to defaults.
 pub fn load_layout_settings() -> LayoutSettingsSnapshot {
-    let mut snapshot = layout_settings_path()
-        .and_then(|path| std::fs::read_to_string(path).ok())
+    layout_settings_path()
+        .map(|path| load_layout_settings_from(&path))
+        .unwrap_or_default()
+}
+
+fn load_layout_settings_from(path: &std::path::Path) -> LayoutSettingsSnapshot {
+    std::fs::read_to_string(path)
+        .ok()
         .and_then(|data| serde_json::from_str::<LayoutSettingsSnapshot>(&data).ok())
-        .unwrap_or_default();
-
-    snapshot.vertical_tabs_width = if snapshot.vertical_tabs_width.is_finite() {
-        snapshot
-            .vertical_tabs_width
-            .clamp(VERTICAL_TABS_MIN_WIDTH, VERTICAL_TABS_MAX_WIDTH)
-    } else {
-        VERTICAL_TABS_DEFAULT_WIDTH
-    };
-
-    snapshot
+        .unwrap_or_default()
+        .sanitized()
 }
 
 pub fn save_layout_settings(snapshot: &LayoutSettingsSnapshot) {
-    let path = match layout_settings_path() {
-        Some(path) => path,
-        None => return,
-    };
-    let _ = std::fs::create_dir_all(path.parent().unwrap());
+    if let Some(path) = layout_settings_path() {
+        save_layout_settings_to(&path, snapshot);
+    }
+}
+
+fn save_layout_settings_to(path: &std::path::Path, snapshot: &LayoutSettingsSnapshot) {
+    if let Some(parent) = path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
     if let Ok(data) = serde_json::to_string_pretty(snapshot) {
         let _ = std::fs::write(path, data);
     }
@@ -884,5 +924,75 @@ mod tests {
         );
 
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn layout_settings_load_save() {
+        let dir =
+            std::env::temp_dir().join(format!("eden-layout-settings-test-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let path = dir.join("layout.json");
+
+        // Missing file -> defaults.
+        assert_eq!(
+            load_layout_settings_from(&path),
+            LayoutSettingsSnapshot::default()
+        );
+
+        // File written by builds without the sidebar fields: the stored
+        // values are kept, the new fields take their defaults.
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            &path,
+            r#"{ "vertical_tabs": true, "vertical_tabs_width": 136.0 }"#,
+        )
+        .unwrap();
+        let old = load_layout_settings_from(&path);
+        assert!(old.vertical_tabs);
+        assert_eq!(old.vertical_tabs_width, 136.0);
+        assert_eq!(old.sidebar_width, SIDEBAR_DEFAULT_WIDTH);
+        assert!(!old.sidebar_collapsed);
+
+        // Round trip (also creates the missing parent dir).
+        let _ = std::fs::remove_dir_all(&dir);
+        let snapshot = LayoutSettingsSnapshot {
+            vertical_tabs: true,
+            vertical_tabs_width: 333.0,
+            sidebar_width: 517.5,
+            sidebar_collapsed: true,
+        };
+        save_layout_settings_to(&path, &snapshot);
+        assert_eq!(load_layout_settings_from(&path), snapshot);
+
+        // Out-of-range values are brought into the absolute bounds only.
+        std::fs::write(
+            &path,
+            r#"{ "vertical_tabs_width": 5.0, "sidebar_width": 99999.0 }"#,
+        )
+        .unwrap();
+        let clamped = load_layout_settings_from(&path);
+        assert_eq!(clamped.vertical_tabs_width, VERTICAL_TABS_MIN_WIDTH);
+        assert_eq!(clamped.sidebar_width, SIDEBAR_MAX_WIDTH);
+        std::fs::write(&path, r#"{ "sidebar_width": 10.0 }"#).unwrap();
+        assert_eq!(
+            load_layout_settings_from(&path).sidebar_width,
+            SIDEBAR_MIN_WIDTH
+        );
+
+        // Corrupt file -> defaults.
+        std::fs::write(&path, "{ not json").unwrap();
+        assert_eq!(
+            load_layout_settings_from(&path),
+            LayoutSettingsSnapshot::default()
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn layout_width_sanitize_rejects_non_finite() {
+        assert_eq!(sanitize_width(f32::NAN, 1.0, 10.0, 5.0), 5.0);
+        assert_eq!(sanitize_width(f32::INFINITY, 1.0, 10.0, 5.0), 5.0);
+        assert_eq!(sanitize_width(7.5, 1.0, 10.0, 5.0), 7.5);
     }
 }

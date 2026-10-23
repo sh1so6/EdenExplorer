@@ -14,7 +14,7 @@ use crate::gui::utils::{SortColumn, sort_files_by_keys};
 use crate::gui::windows::containers::enums::ItemViewerAction;
 use crate::gui::windows::containers::explorer::draw_tab_content;
 use crate::gui::windows::containers::itemviewer_navbar::NAVBAR_MIN_STRIP_WIDTH;
-use crate::gui::windows::containers::sidebar::draw_sidebar;
+use crate::gui::windows::containers::sidebar::{SIDEBAR_MIN_WIDTH, draw_sidebar};
 use crate::gui::windows::containers::structs::{
     FavoriteItem, FileOpState, ItemViewerColumnState, ItemViewerFolderSizeState,
     ItemViewerNavBarAction, RenameState, SidebarAction, SplitSide, TabInfo, TabState, TabsAction,
@@ -292,6 +292,8 @@ impl Default for MainWindow {
 
         app.theme_customizer.light_palette = get_palette(ThemeMode::Light);
         app.theme_customizer.dark_palette = get_palette(ThemeMode::Dark);
+        app.sidebar_state.sidebar_default_width = layout_settings.sidebar_width;
+        app.sidebar_collapsed = layout_settings.sidebar_collapsed;
         app.sidebar_state.collapsed_sections =
             SidebarCollapsedSections::from_keys(&load_sidebar_settings().collapsed);
         let stored = load_favorites('C');
@@ -340,6 +342,7 @@ impl MainWindow {
 
 impl eframe::App for MainWindow {
     fn ui(&mut self, ui: &mut egui::Ui, frame: &mut eframe::Frame) {
+        self.sync_manual_window_size();
         {
             let forwarded_paths = take_forwarded_paths();
             for path in &forwarded_paths {
@@ -489,7 +492,7 @@ impl eframe::App for MainWindow {
                     |ui| {
                         // --- Sidebar column ---
                         let collapsed_width = 38.0;
-                        let sidebar_width_min = 140.0;
+                        let sidebar_width_min = SIDEBAR_MIN_WIDTH;
                         let explorer_min_width = 200.0;
                         let sidebar_width_max =
                             (avail.x - explorer_min_width).max(sidebar_width_min);
@@ -1191,11 +1194,16 @@ impl eframe::App for MainWindow {
                             }
 
                             if separator_response.dragged() {
-                                self.sidebar_state.sidebar_default_width =
-                                    (self.sidebar_state.sidebar_default_width
-                                        + separator_response.drag_delta().x)
-                                        .max(sidebar_width_min)
-                                        .min(sidebar_width_max);
+                                // Start from the width actually drawn: the stored preference
+                                // may exceed what the current window allows.
+                                self.sidebar_state.sidebar_default_width = (sidebar_width
+                                    + separator_response.drag_delta().x)
+                                    .max(sidebar_width_min)
+                                    .min(sidebar_width_max);
+                            }
+
+                            if separator_response.drag_stopped() {
+                                save_layout_settings = true;
                             }
                         }
 

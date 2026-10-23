@@ -89,6 +89,8 @@ pub struct SidebarState {
     pub favorites: Vec<FavoriteItem>,
     pub item_clicked: Option<PathBuf>,
     pub dragging_favorite: Option<usize>,
+    /// Preferred (expanded) sidebar width, persisted in `layout.json`. Drawn
+    /// clamped to the window, without writing the clamped value back.
     pub sidebar_default_width: f32,
     pub cached_drives: Vec<DriveInfo>,
     pub last_drive_refresh: Instant,
@@ -183,7 +185,7 @@ impl Default for SidebarState {
             favorites: vec![],
             dragging_favorite: None,
             item_clicked: None,
-            sidebar_default_width: 250.0,
+            sidebar_default_width: crate::gui::windows::containers::sidebar::SIDEBAR_DEFAULT_WIDTH,
             cached_drives: Vec::new(),
             last_drive_refresh: now.checked_sub(Duration::from_secs(60)).unwrap_or(now),
             non_ntfs_popup_path: None,

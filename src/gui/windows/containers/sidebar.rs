@@ -16,6 +16,13 @@ use egui_phosphor::regular;
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
+/// Narrowest width the sidebar separator can be dragged to.
+pub const SIDEBAR_MIN_WIDTH: f32 = 140.0;
+/// Upper bound for a stored sidebar width. At draw time the width is also
+/// limited by the window, so this only rejects nonsensical stored values.
+pub const SIDEBAR_MAX_WIDTH: f32 = 4000.0;
+pub const SIDEBAR_DEFAULT_WIDTH: f32 = 250.0;
+
 /// Draw the sidebar, supporting favorites reordering
 pub fn draw_sidebar(
     ui: &mut egui::Ui,
