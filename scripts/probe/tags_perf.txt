@@ -1,0 +1,28 @@
+# Frame cost after the change: explorer with the dock closed, then open.
+# CPU per frame was measured with a CPU-sampling runner around this script;
+# the log's frame counts / max frame gaps work with ./scripts/ui-probe.ps1 too:
+#   ./scripts/ui-probe.ps1 -Script scripts/probe/tags_perf.txt -Seed scripts/probe/seed_tags
+size 1117 717
+wait_ms 1500
+move 700 600
+# dock closed
+wait_ms 2000
+wait_ms 2000
+wait_ms 2000
+# dock open (topbar tags icon)
+click 107 18
+move 700 300
+wait_ms 1000
+wait_ms 2000
+wait_ms 2000
+wait_ms 2000
+shot out/tags_perf_dock_open.png
+# dock dragged to its maximum height (content keeps 150)
+drag 700 474 700 100 10
+move 700 600
+wait_ms 1000
+wait_ms 2000
+wait_ms 2000
+wait_ms 2000
+shot out/tags_perf_dock_tall.png
+quit

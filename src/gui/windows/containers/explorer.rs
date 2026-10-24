@@ -2,7 +2,7 @@ use crate::gui::dragdrop::DropTargets;
 use crate::gui::i18n::I18n;
 use crate::gui::icons::IconCache;
 use crate::gui::theme::ThemePalette;
-use crate::gui::windows::containers::enums::ItemViewerAction;
+use crate::gui::windows::containers::enums::{ItemViewerAction, ItemViewerNavAction};
 use crate::gui::windows::containers::itemviewer::draw_item_viewer;
 use crate::gui::windows::containers::itemviewer_helper::open_pending_item_menu;
 use crate::gui::windows::containers::itemviewer_navbar::draw_itemviewer_navigation_bar;
@@ -217,6 +217,16 @@ pub fn draw_tab_content(
                         });
                 }
             });
+
+            // Empty-space double-click: go up through this view's own nav
+            // action, so a split pane navigates the pane that was clicked.
+            if matches!(pending_action, Some(ItemViewerAction::NavigateUp)) {
+                pending_action = None;
+                if !view.nav.is_root() && !view.nav.is_recycle_bin() {
+                    tabbar_action.get_or_insert_with(Default::default).nav =
+                        Some(ItemViewerNavAction::Up);
+                }
+            }
 
             // A split view renders both panes into the same DropTargets value.
             // Keep an already detected target so rendering the other pane does

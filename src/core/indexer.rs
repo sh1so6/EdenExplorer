@@ -9,6 +9,9 @@ use crate::gui::windows::containers::structs::{GalleryThumbnailSize, ItemViewerD
 use crate::gui::windows::containers::tabs::{
     VERTICAL_TABS_DEFAULT_WIDTH, VERTICAL_TABS_MAX_WIDTH, VERTICAL_TABS_MIN_WIDTH,
 };
+use crate::gui::windows::containers::tags::{
+    TAGS_DOCK_DEFAULT_HEIGHT, TAGS_DOCK_MAX_HEIGHT, TAGS_DOCK_MIN_HEIGHT,
+};
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
@@ -575,6 +578,10 @@ pub struct LayoutSettingsSnapshot {
     pub sidebar_width: f32,
     /// Whether the sidebar is collapsed to its icon strip.
     pub sidebar_collapsed: bool,
+    /// Whether the tags panel is docked open below the explorer content.
+    pub tags_dock_open: bool,
+    /// Preferred tags panel height (points). Clamped to the window when drawn.
+    pub tags_dock_height: f32,
 }
 
 impl Default for LayoutSettingsSnapshot {
@@ -584,6 +591,8 @@ impl Default for LayoutSettingsSnapshot {
             vertical_tabs_width: VERTICAL_TABS_DEFAULT_WIDTH,
             sidebar_width: SIDEBAR_DEFAULT_WIDTH,
             sidebar_collapsed: false,
+            tags_dock_open: false,
+            tags_dock_height: TAGS_DOCK_DEFAULT_HEIGHT,
         }
     }
 }
@@ -604,6 +613,12 @@ impl LayoutSettingsSnapshot {
             SIDEBAR_MIN_WIDTH,
             SIDEBAR_MAX_WIDTH,
             SIDEBAR_DEFAULT_WIDTH,
+        );
+        self.tags_dock_height = sanitize_width(
+            self.tags_dock_height,
+            TAGS_DOCK_MIN_HEIGHT,
+            TAGS_DOCK_MAX_HEIGHT,
+            TAGS_DOCK_DEFAULT_HEIGHT,
         );
         self
     }
@@ -952,6 +967,8 @@ mod tests {
         assert_eq!(old.vertical_tabs_width, 136.0);
         assert_eq!(old.sidebar_width, SIDEBAR_DEFAULT_WIDTH);
         assert!(!old.sidebar_collapsed);
+        assert!(!old.tags_dock_open);
+        assert_eq!(old.tags_dock_height, TAGS_DOCK_DEFAULT_HEIGHT);
 
         // Round trip (also creates the missing parent dir).
         let _ = std::fs::remove_dir_all(&dir);
@@ -960,6 +977,8 @@ mod tests {
             vertical_tabs_width: 333.0,
             sidebar_width: 517.5,
             sidebar_collapsed: true,
+            tags_dock_open: true,
+            tags_dock_height: 321.0,
         };
         save_layout_settings_to(&path, &snapshot);
         assert_eq!(load_layout_settings_from(&path), snapshot);
@@ -994,5 +1013,96 @@ mod tests {
         assert_eq!(sanitize_width(f32::NAN, 1.0, 10.0, 5.0), 5.0);
         assert_eq!(sanitize_width(f32::INFINITY, 1.0, 10.0, 5.0), 5.0);
         assert_eq!(sanitize_width(7.5, 1.0, 10.0, 5.0), 7.5);
+    }
+
+    #[test]
+    fn layout_settings_tags_dock_fields() {
+        // layout.json written before the tags dock existed (sidebar fields only).
+        let old: LayoutSettingsSnapshot = serde_json::from_str(
+            r#"{ "vertical_tabs": false, "vertical_tabs_width": 200.0,
+                 "sidebar_width": 300.0, "sidebar_collapsed": false }"#,
+        )
+        .unwrap();
+        assert!(!old.tags_dock_open);
+        assert_eq!(old.tags_dock_height, TAGS_DOCK_DEFAULT_HEIGHT);
+        assert_eq!(old.sidebar_width, 300.0);
+
+        let stored: LayoutSettingsSnapshot =
+            serde_json::from_str(r#"{ "tags_dock_open": true, "tags_dock_height": 5.0 }"#).unwrap();
+        let stored = stored.sanitized();
+        assert!(stored.tags_dock_open);
+        assert_eq!(stored.tags_dock_height, TAGS_DOCK_MIN_HEIGHT);
+
+        let non_finite = LayoutSettingsSnapshot {
+            tags_dock_height: f32::NAN,
+            ..Default::default()
+        }
+        .sanitized();
+        assert_eq!(non_finite.tags_dock_height, TAGS_DOCK_DEFAULT_HEIGHT);
+    }
+
+    /// Writes `scripts/probe/seed_tags/tags.bin` for the UI probe (three tags
+    /// pointing at real system paths). Run on demand:
+    /// `cargo test write_probe_tags_seed -- --ignored`
+    #[test]
+    #[ignore]
+    fn write_probe_tags_seed() {
+        let windows = PathBuf::from(r"C:\Windows");
+        let mut system_items: Vec<PathBuf> = std::fs::read_dir(&windows)
+            .map(|entries| entries.filter_map(|e| e.ok().map(|e| e.path())).collect())
+            .unwrap_or_default();
+        system_items.sort();
+        system_items.truncate(40);
+        let snapshot = TagsSnapshot {
+            version: 1,
+            next_group_id: 4,
+            groups: vec![
+                TagGroupSnapshot {
+                    id: 1,
+                    name: "Work".to_string(),
+                    color: [235, 120, 120, 255],
+                    items: vec![PathBuf::from(r"C:\Windows"), PathBuf::from(r"C:\Users")],
+                },
+                TagGroupSnapshot {
+                    id: 2,
+                    name: "Projects with a rather long tag name".to_string(),
+                    color: [120, 190, 235, 255],
+                    items: vec![
+                        PathBuf::from(r"C:\Windows\System32"),
+                        PathBuf::from(r"C:\Windows\explorer.exe"),
+                        PathBuf::from(r"C:\Windows\notepad.exe"),
+                    ],
+                },
+                TagGroupSnapshot {
+                    id: 3,
+                    name: "System".to_string(),
+                    color: [140, 220, 140, 255],
+                    items: system_items,
+                },
+            ],
+        };
+        let probe_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("scripts/probe");
+        let tags_bin = postcard::to_allocvec(&snapshot).unwrap();
+        let dir = probe_dir.join("seed_tags");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("tags.bin"), &tags_bin).unwrap();
+
+        // Drag test seed: the same tags plus favorites pointing at a scratch
+        // folder (`%TEMP%\eden-tag-drop`, created by the probe script runner).
+        let scratch = std::env::temp_dir().join("eden-tag-drop");
+        let favorites = FavoritesSnapshot {
+            favorites: vec![
+                scratch.join("src").display().to_string(),
+                scratch.join("dst").display().to_string(),
+            ],
+        };
+        let dir = probe_dir.join("seed_tags_drag");
+        std::fs::create_dir_all(dir.join("favorites")).unwrap();
+        std::fs::write(dir.join("tags.bin"), &tags_bin).unwrap();
+        std::fs::write(
+            dir.join("favorites").join("drive_C.bin"),
+            postcard::to_allocvec(&favorites).unwrap(),
+        )
+        .unwrap();
     }
 }

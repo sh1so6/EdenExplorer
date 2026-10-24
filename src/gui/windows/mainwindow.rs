@@ -14,7 +14,7 @@ use crate::gui::utils::{SortColumn, sort_files_by_keys};
 use crate::gui::windows::containers::enums::ItemViewerAction;
 use crate::gui::windows::containers::explorer::draw_tab_content;
 use crate::gui::windows::containers::itemviewer_navbar::NAVBAR_MIN_STRIP_WIDTH;
-use crate::gui::windows::containers::sidebar::{SIDEBAR_MIN_WIDTH, draw_sidebar};
+use crate::gui::windows::containers::sidebar::{SIDEBAR_MIN_WIDTH, SidebarTags, draw_sidebar};
 use crate::gui::windows::containers::structs::{
     FavoriteItem, FileOpState, ItemViewerColumnState, ItemViewerFolderSizeState,
     ItemViewerNavBarAction, RenameState, SidebarAction, SplitSide, TabInfo, TabState, TabsAction,
@@ -25,7 +25,7 @@ use crate::gui::windows::containers::tabs::{
     handle_window_drag_area,
 };
 use crate::gui::windows::containers::tags::{
-    draw_delete_confirmation_popup, draw_tag_picker_popup, draw_tags,
+    draw_delete_confirmation_popup, draw_tag_picker_popup, draw_tags, layout_tags_dock,
 };
 use crate::gui::windows::containers::topbar::draw_topbar;
 use crate::gui::windows::mainwindow_imp::{
@@ -66,8 +66,16 @@ pub struct MainWindow {
     pub(crate) dropped_files_pending_ui_refresh: bool,
     pub(crate) shutdown: Arc<AtomicBool>,
     pub(crate) hwnd: Option<HWND>,
-    pub(crate) display_file_explorer: bool,
     pub(crate) sidebar_collapsed: bool,
+    /// Tags panel docked below the explorer content (persisted in `layout.json`).
+    pub(crate) tags_dock_open: bool,
+    /// Preferred dock height, persisted. Drawn clamped to the window.
+    pub(crate) tags_dock_height: f32,
+    /// The last pointer press landed in the tags dock: explorer keyboard
+    /// shortcuts are suppressed until the user presses in the explorer again.
+    pub(crate) tags_dock_focused: bool,
+    /// Rect of the docked tags panel in the previous frame (for focus tracking).
+    pub(crate) tags_dock_rect: Option<egui::Rect>,
 
     // File Explorer Variables (per-tab/per-view state lives on TabState/TabView)
     pub(crate) tabs: Vec<TabState>,
@@ -226,8 +234,11 @@ impl Default for MainWindow {
                 Some("light") => ThemeMode::Light,
                 Some("dark") | _ => ThemeMode::Dark,
             },
-            display_file_explorer: true,
             sidebar_collapsed: false,
+            tags_dock_open: false,
+            tags_dock_height: crate::gui::windows::containers::tags::TAGS_DOCK_DEFAULT_HEIGHT,
+            tags_dock_focused: false,
+            tags_dock_rect: None,
             theme_dirty: true,
             window_override_set: false,
             dragdrop: None,
@@ -294,6 +305,8 @@ impl Default for MainWindow {
         app.theme_customizer.dark_palette = get_palette(ThemeMode::Dark);
         app.sidebar_state.sidebar_default_width = layout_settings.sidebar_width;
         app.sidebar_collapsed = layout_settings.sidebar_collapsed;
+        app.tags_dock_open = layout_settings.tags_dock_open;
+        app.tags_dock_height = layout_settings.tags_dock_height;
         app.sidebar_state.collapsed_sections =
             SidebarCollapsedSections::from_keys(&load_sidebar_settings().collapsed);
         let stored = load_favorites('C');
@@ -419,6 +432,37 @@ impl eframe::App for MainWindow {
             backend.set_scale_factor(ui.ctx().pixels_per_point());
         }
 
+        // Tags dock keyboard focus: a press inside the dock (last frame's rect)
+        // gives it focus, a press anywhere else on the main layer gives it back
+        // to the explorer. Presses in popups/windows (e.g. a color picker opened
+        // from the dock) keep the current owner.
+        if self.tags_dock_open {
+            let press = ui.ctx().input(|i| {
+                if i.pointer.any_pressed() {
+                    i.pointer.press_origin()
+                } else {
+                    None
+                }
+            });
+            if let Some(pos) = press {
+                let on_main_layer = ui
+                    .ctx()
+                    .layer_id_at(pos)
+                    .is_none_or(|layer| layer.order == egui::Order::Background);
+                if on_main_layer {
+                    self.tags_dock_focused =
+                        self.tags_dock_rect.is_some_and(|rect| rect.contains(pos));
+                }
+            }
+        } else {
+            self.tags_dock_focused = false;
+            self.tags_dock_rect = None;
+        }
+        self.tags_state.keyboard_captured = self.tags_dock_open
+            && (self.tags_dock_focused || self.tags_state.rename_state.is_some());
+        let tags_dock_focused = self.tags_state.keyboard_captured;
+        let mut tags_dock_close_requested = false;
+
         if self.theme_dirty {
             apply_theme(ui.ctx(), self.theme);
             apply_font_to_context(ui.ctx(), &palette);
@@ -521,7 +565,7 @@ impl eframe::App for MainWindow {
                                         ui,
                                         &self.i18n,
                                         self.theme == ThemeMode::Dark,
-                                        self.display_file_explorer,
+                                        self.tags_dock_open,
                                         self.sidebar_collapsed,
                                         self.hwnd,
                                         &palette,
@@ -531,11 +575,18 @@ impl eframe::App for MainWindow {
                                 });
                                 if !self.sidebar_collapsed {
                                     let frame_response = sidebar_frame.show(ui, |ui| {
+                                        let sidebar_tags = SidebarTags {
+                                            groups: &self.tags_state.groups,
+                                            dock_open: self.tags_dock_open,
+                                            focused: self.tags_state.focused_group,
+                                            highlight: self.tags_state.highlight,
+                                        };
                                         sidebar_action = Some(draw_sidebar(
                                             ui,
                                             &self.i18n,
                                             &icon_cache,
                                             &mut self.sidebar_state,
+                                            &sidebar_tags,
                                             &palette,
                                             drag_active,
                                             drag_hover_target.clone(),
@@ -582,7 +633,7 @@ impl eframe::App for MainWindow {
                         }
 
                         // --- Explorer column ---
-                        if self.display_file_explorer {
+                        {
                             update_tab_infos_cache(
                                 &self.tabs,
                                 &mut self.tab_infos_cache,
@@ -878,7 +929,7 @@ impl eframe::App for MainWindow {
                                                         ui.available_size(),
                                                         egui::Layout::top_down(egui::Align::Min),
                                                         |ui| {
-                                                            if primary_focused {
+                                                            if primary_focused && !tags_dock_focused {
                                                                 let accent_rect =
                                                                     ui.available_rect_before_wrap();
                                                                 ui.painter().hline(
@@ -970,7 +1021,7 @@ impl eframe::App for MainWindow {
                                                         ui.available_size(),
                                                         egui::Layout::top_down(egui::Align::Min),
                                                         |ui| {
-                                                            if secondary_focused {
+                                                            if secondary_focused && !tags_dock_focused {
                                                                 let accent_rect =
                                                                     ui.available_rect_before_wrap();
                                                                 ui.painter().hline(
@@ -1131,6 +1182,23 @@ impl eframe::App for MainWindow {
                                         }
                                     };
 
+                                    // -------------------------
+                                    // Tags dock: horizontal split below the content
+                                    // (under both panes / right of the tab rail)
+                                    // -------------------------
+                                    let dock_layout = if self.tags_dock_open {
+                                        layout_tags_dock(
+                                            content_rect
+                                                .unwrap_or_else(|| ui.available_rect_before_wrap()),
+                                            self.tags_dock_height,
+                                            ui.ctx().pixels_per_point(),
+                                        )
+                                    } else {
+                                        None
+                                    };
+                                    let content_rect =
+                                        dock_layout.as_ref().map(|dock| dock.content).or(content_rect);
+
                                     if let Some(content_rect) = content_rect {
                                         ui.scope_builder(
                                             egui::UiBuilder::new().max_rect(content_rect),
@@ -1141,17 +1209,71 @@ impl eframe::App for MainWindow {
                                     } else {
                                         container.show(ui, draw_content);
                                     }
+
+                                    self.tags_dock_rect = dock_layout.as_ref().map(|dock| dock.panel);
+                                    if let Some(dock) = dock_layout {
+                                        let line_y = dock.separator.center().y;
+                                        ui.painter().hline(
+                                            dock.separator.x_range(),
+                                            line_y,
+                                            egui::Stroke::new(1.0, palette.borders_default),
+                                        );
+                                        let separator_response = ui.interact(
+                                            dock.separator,
+                                            ui.id().with("tags_dock_separator"),
+                                            egui::Sense::click_and_drag(),
+                                        );
+                                        if separator_response.hovered()
+                                            || separator_response.dragged()
+                                        {
+                                            ui.ctx().set_cursor_icon(egui::CursorIcon::ResizeVertical);
+                                            let handle_width = 25.0;
+                                            let handle_height = 6.0;
+                                            let handle_rect = egui::Rect::from_center_size(
+                                                egui::pos2(dock.separator.center().x, line_y),
+                                                egui::vec2(handle_width, handle_height),
+                                            );
+                                            ui.painter().rect_filled(
+                                                handle_rect,
+                                                handle_height / 2.0,
+                                                palette.button_seperator_handle_fill,
+                                            );
+                                        }
+                                        if separator_response.dragged() {
+                                            // Start from the height actually drawn: the
+                                            // stored preference may exceed the window.
+                                            self.tags_dock_height = (dock.height
+                                                - separator_response.drag_delta().y)
+                                                .clamp(dock.min_height, dock.max_height);
+                                        }
+                                        if separator_response.drag_stopped() {
+                                            save_layout_settings = true;
+                                        }
+
+                                        ui.scope_builder(
+                                            egui::UiBuilder::new()
+                                                .id_salt("tags_dock")
+                                                .max_rect(dock.panel),
+                                            |ui| {
+                                                ui.set_clip_rect(
+                                                    dock.panel.intersect(ui.clip_rect()),
+                                                );
+                                                let response = draw_tags(
+                                                    ui,
+                                                    &self.i18n,
+                                                    &icon_cache,
+                                                    &palette,
+                                                    &mut self.tags_state,
+                                                    tags_dock_focused,
+                                                );
+                                                tags_changed |= response.changed;
+                                                tags_dock_close_requested |=
+                                                    response.close_requested;
+                                            },
+                                        );
+                                    }
                                 },
                             );
-                        } else if draw_tags(
-                            ui,
-                            &self.i18n,
-                            &icon_cache,
-                            &palette,
-                            self.hwnd,
-                            &mut self.tags_state,
-                        ) {
-                            tags_changed = true;
                         }
 
                         if let Some(frame_rect) = sidebar_frame_rect {
@@ -1207,9 +1329,6 @@ impl eframe::App for MainWindow {
                             }
                         }
 
-                        if let Some(tags_action) = self.tags_state.pending_action.take() {
-                            pending_action = Some(tags_action);
-                        }
 
                         if draw_delete_confirmation_popup(
                             ui.ctx(),
@@ -1232,6 +1351,14 @@ impl eframe::App for MainWindow {
         // are the same view. For split views, the target pane has a different
         // DragState, so handle the cross-pane release here using the shared
         // drop target collected from both panes.
+        // Sources of an internal drag released this frame. The block below clears
+        // the views' drag states, so the sidebar (favorite/tag drop) handler
+        // further down gets them from here.
+        let mut released_drag_sources: Option<Vec<PathBuf>> = None;
+        // Items dropped on a sidebar tag are only tagged, never moved/copied.
+        let tag_drop = sidebar_action
+            .as_ref()
+            .is_some_and(|action| action.add_to_tag.is_some());
         if !native_drag_active && ui.ctx().input(|input| input.pointer.primary_released()) {
             let source_items = if self.tabs[self.active_tab].primary_view.drag_state.active {
                 self.tabs[self.active_tab]
@@ -1254,20 +1381,15 @@ impl eframe::App for MainWindow {
             };
 
             if !source_items.is_empty() {
-                let pointer_pos = ui.ctx().input(|input| input.pointer.interact_pos());
-                let target_dir = drop_targets.item_target.target.clone().or_else(|| {
-                    drop_targets
-                        .item_background_targets
-                        .iter()
-                        .find(|region| {
-                            pointer_pos
-                                .zip(region.rect)
-                                .is_some_and(|(pos, rect)| rect.contains(pos))
-                        })
-                        .and_then(|region| region.target.clone())
-                });
+                // Only a folder row is a move target for an internal drag:
+                // releasing it over the empty area of either pane does nothing
+                // (`item_background_targets` are only for inbound OLE drops).
+                let target_dir = drop_targets.item_target.target.clone();
 
-                if let Some(target_dir) = target_dir {
+                released_drag_sources = Some(source_items.clone());
+                if let Some(target_dir) = target_dir
+                    && !tag_drop
+                {
                     pending_action = Some(ItemViewerAction::MoveItems {
                         sources: source_items,
                         target_dir,
@@ -1386,12 +1508,15 @@ impl eframe::App for MainWindow {
                     Some(v.drag_state.source_items.clone())
                 }
             });
+        // Tabs keep their previous behavior (no fallback to the released
+        // sources); only the sidebar (favorite / tag drop) uses it.
         let tabs_drag_sources = primary_drag_sources
             .clone()
             .or_else(|| secondary_drag_sources.clone());
         let sidebar_drag_sources = primary_drag_sources
             .clone()
-            .or_else(|| secondary_drag_sources.clone());
+            .or_else(|| secondary_drag_sources.clone())
+            .or_else(|| released_drag_sources.clone());
         let primary_move_target = tabbar_action
             .as_ref()
             .and_then(|a| a.move_files_to_breadcrumb_dir.as_ref())
@@ -1403,7 +1528,8 @@ impl eframe::App for MainWindow {
             || sidebar_action
                 .as_ref()
                 .and_then(|a| a.move_files_to_sidebar_dir.as_ref())
-                .is_some();
+                .is_some()
+            || tag_drop;
         let secondary_move_target = secondary_tabbar_action
             .as_ref()
             .and_then(|a| a.move_files_to_breadcrumb_dir.as_ref())
@@ -1417,7 +1543,10 @@ impl eframe::App for MainWindow {
             self.save_layout_settings_to_disk();
         }
         self.handle_topbar_action(topbar_action);
-        self.handle_sidebar_action(sidebar_action, sidebar_drag_sources.as_deref());
+        if tags_dock_close_requested {
+            self.set_tags_dock_open(false);
+        }
+        tags_changed |= self.handle_sidebar_action(sidebar_action, sidebar_drag_sources.as_deref());
         self.handle_tabs_action(tabs_action, tabs_drag_sources.as_deref());
 
         // Route each view's breadcrumb actions with focus pinned to that view for the
@@ -1478,6 +1607,11 @@ impl eframe::App for MainWindow {
             handle_pending_actions(secondary_pending_action, self);
         }
         self.focused_split = restore_focus;
+        // Tags dock item actions (open folder / file) apply to the focused pane.
+        if let Some(tags_action) = self.tags_state.pending_action.take() {
+            handle_pending_actions(Some(tags_action), self);
+            self.focused_split = restore_focus;
+        }
         if draw_tag_picker_popup(ui.ctx(), &self.i18n, &palette, &mut self.tags_state) {
             tags_changed = true;
         }

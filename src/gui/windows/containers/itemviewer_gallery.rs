@@ -82,7 +82,6 @@ pub fn draw_gallery_view(
             false,
             false,
             &current_dir,
-            drag_state,
             modal_input_blocked,
             false,
         )
@@ -291,29 +290,34 @@ pub fn draw_gallery_view(
                     }
                 }
 
+                // A dragged folder is no drop target for itself.
                 if let Some((_, is_dir, path, rect)) = best_hovered_tile.take()
                     && is_dir
+                    && !drag_state.source_items.contains(&path)
                 {
                     current_hovered_drop_target = Some(path);
                     current_hovered_drop_target_rect = Some(rect);
                 }
 
-                if drag_state.active && pointer_released {
-                    let target_dir = current_hovered_drop_target
-                        .clone()
-                        .or_else(|| bg_response.hovered().then(|| current_dir.clone()));
-
-                    if let Some(target_dir) = target_dir {
-                        action = Some(ItemViewerAction::MoveItems {
-                            sources: drag_state.source_items.clone(),
-                            target_dir,
-                        });
-                    }
+                // Internal drags only move onto a folder tile; releasing them
+                // over empty space does nothing.
+                if drag_state.active
+                    && pointer_released
+                    && let Some(target_dir) = current_hovered_drop_target.clone()
+                {
+                    action = Some(ItemViewerAction::MoveItems {
+                        sources: drag_state.source_items.clone(),
+                        target_dir,
+                    });
                 }
 
                 if !modal_input_blocked {
                     if bg_response.clicked() {
                         action = Some(ItemViewerAction::DeselectAll);
+                    }
+                    // Double-click on empty space goes up one level.
+                    if bg_response.double_clicked() {
+                        action = Some(ItemViewerAction::NavigateUp);
                     }
 
                     Popup::context_menu(&bg_response)

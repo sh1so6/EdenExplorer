@@ -5,6 +5,7 @@ use eframe::egui;
 use std::collections::VecDeque;
 use std::path::PathBuf;
 use std::ptr::null_mut;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
 use windows::Win32::Foundation::{
     DRAGDROP_S_CANCEL, DRAGDROP_S_DROP, DRAGDROP_S_USEDEFAULTCURSORS, HWND, POINT,
@@ -17,7 +18,9 @@ use windows::Win32::System::Ole::{
     CF_HDROP, DoDragDrop, IDropSource, IDropSource_Impl, IDropTarget, IDropTarget_Impl,
     ReleaseStgMedium,
 };
-use windows::Win32::System::Ole::{DROPEFFECT, DROPEFFECT_COPY, DROPEFFECT_LINK, DROPEFFECT_MOVE};
+use windows::Win32::System::Ole::{
+    DROPEFFECT, DROPEFFECT_COPY, DROPEFFECT_LINK, DROPEFFECT_MOVE, DROPEFFECT_NONE,
+};
 use windows::Win32::System::Ole::{RegisterDragDrop, RevokeDragDrop};
 use windows::Win32::System::SystemServices::{MK_LBUTTON, MODIFIERKEYS_FLAGS};
 use windows::Win32::UI::Shell::DragQueryFileW;
@@ -34,6 +37,9 @@ struct DropShared {
     commands: Mutex<VecDeque<NativeDropCommand>>,
     drag_active: RwLock<bool>,
     inbound_drag_active: RwLock<bool>,
+    /// True while our own `DoDragDrop` (an item viewer drag that left the
+    /// window) runs. Unlike `drag_active`, `DragLeave` does not reset it.
+    outbound_drag_active: AtomicBool,
     hovered_target: RwLock<Option<PathBuf>>,
     scale_factor: RwLock<f32>,
 }
@@ -45,6 +51,7 @@ impl DropShared {
             commands: Mutex::new(VecDeque::new()),
             drag_active: RwLock::new(false),
             inbound_drag_active: RwLock::new(false),
+            outbound_drag_active: AtomicBool::new(false),
             hovered_target: RwLock::new(None),
             scale_factor: RwLock::new(1.0),
         }
@@ -146,7 +153,41 @@ fn active_hwnd() -> Option<HWND> {
         .and_then(|hwnd| hwnd.map(|raw| HWND(raw as *mut core::ffi::c_void)))
 }
 
-fn hit_test_target_at(pt: windows::Win32::Foundation::POINTL) -> Option<PathBuf> {
+/// Where an OLE drag over the window would drop.
+enum DropHit {
+    /// Not over any target.
+    None,
+    /// Over a folder row, breadcrumb, tab or an item viewer's empty area.
+    Target(PathBuf),
+    /// Our own drag (an item viewer drag that left the window and came back)
+    /// over an item viewer's empty area: not a drop target, drop nothing.
+    OwnDragBackground,
+}
+
+impl DropHit {
+    fn target(&self) -> Option<PathBuf> {
+        match self {
+            DropHit::Target(target) => Some(target.clone()),
+            DropHit::None | DropHit::OwnDragBackground => None,
+        }
+    }
+}
+
+fn hit_test_drop_at(pt: windows::Win32::Foundation::POINTL) -> DropHit {
+    let Some((target, is_background)) = hit_test_target_at(pt) else {
+        return DropHit::None;
+    };
+    let own_drag =
+        active_shared().is_some_and(|shared| shared.outbound_drag_active.load(Ordering::Acquire));
+    if is_background && own_drag {
+        DropHit::OwnDragBackground
+    } else {
+        DropHit::Target(target)
+    }
+}
+
+/// The target under `pt` and whether it is an item viewer's empty area.
+fn hit_test_target_at(pt: windows::Win32::Foundation::POINTL) -> Option<(PathBuf, bool)> {
     let shared = active_shared()?;
     let hwnd = active_hwnd()?;
     let scale = shared.scale_factor();
@@ -166,18 +207,18 @@ fn hit_test_target_at(pt: windows::Win32::Foundation::POINTL) -> Option<PathBuf>
     ];
 
     for region in ordered {
-        if let (Some(target), Some(rect)) = (&region.target, region.rect) {
-            if rect.contains(pos) {
-                return Some(target.clone());
-            }
+        if let (Some(target), Some(rect)) = (&region.target, region.rect)
+            && rect.contains(pos)
+        {
+            return Some((target.clone(), false));
         }
     }
 
     for region in &targets.item_background_targets {
-        if let (Some(target), Some(rect)) = (&region.target, region.rect) {
-            if rect.contains(pos) {
-                return Some(target.clone());
-            }
+        if let (Some(target), Some(rect)) = (&region.target, region.rect)
+            && rect.contains(pos)
+        {
+            return Some((target.clone(), true));
         }
     }
 
@@ -185,11 +226,11 @@ fn hit_test_target_at(pt: windows::Win32::Foundation::POINTL) -> Option<PathBuf>
 }
 
 impl WindowDropTarget {
-    fn current_effect(target: Option<PathBuf>) -> DROPEFFECT {
-        if target.is_some() {
-            DROPEFFECT_MOVE
-        } else {
-            DROPEFFECT_COPY
+    fn current_effect(hit: &DropHit) -> DROPEFFECT {
+        match hit {
+            DropHit::Target(_) => DROPEFFECT_MOVE,
+            DropHit::None => DROPEFFECT_COPY,
+            DropHit::OwnDragBackground => DROPEFFECT_NONE,
         }
     }
 }
@@ -202,15 +243,15 @@ impl IDropTarget_Impl for WindowDropTarget_Impl {
         _pt: &windows::Win32::Foundation::POINTL,
         pdweffect: *mut DROPEFFECT,
     ) -> Result<()> {
-        let target = hit_test_target_at(*_pt);
+        let hit = hit_test_drop_at(*_pt);
         if let Some(shared) = active_shared() {
             shared.set_drag_active(true);
             shared.set_inbound_drag_active(true);
-            shared.set_hovered_target(target.clone());
+            shared.set_hovered_target(hit.target());
         }
         request_repaint();
         unsafe {
-            *pdweffect = WindowDropTarget::current_effect(target);
+            *pdweffect = WindowDropTarget::current_effect(&hit);
         }
         Ok(())
     }
@@ -221,14 +262,14 @@ impl IDropTarget_Impl for WindowDropTarget_Impl {
         _pt: &windows::Win32::Foundation::POINTL,
         pdweffect: *mut DROPEFFECT,
     ) -> Result<()> {
-        let target = hit_test_target_at(*_pt);
+        let hit = hit_test_drop_at(*_pt);
         if let Some(shared) = active_shared() {
-            shared.set_hovered_target(target.clone());
+            shared.set_hovered_target(hit.target());
             shared.set_inbound_drag_active(true);
         }
         request_repaint();
         unsafe {
-            *pdweffect = WindowDropTarget::current_effect(target);
+            *pdweffect = WindowDropTarget::current_effect(&hit);
         }
         Ok(())
     }
@@ -250,29 +291,33 @@ impl IDropTarget_Impl for WindowDropTarget_Impl {
         _pt: &windows::Win32::Foundation::POINTL,
         pdweffect: *mut DROPEFFECT,
     ) -> Result<()> {
-        let target = hit_test_target_at(*_pt);
+        let hit = hit_test_drop_at(*_pt);
         request_repaint();
         let Some(shared) = active_shared() else {
             return Ok(());
         };
-        let sources = read_paths_from_data_object(pdataobj)?;
 
-        let command = if let Some(target_dir) = target.clone() {
-            NativeDropCommand::MoveFiles {
-                sources,
-                target_dir,
-            }
-        } else {
-            NativeDropCommand::ImportFiles(sources)
+        let command = match &hit {
+            DropHit::Target(target_dir) => Some(NativeDropCommand::MoveFiles {
+                sources: read_paths_from_data_object(pdataobj)?,
+                target_dir: target_dir.clone(),
+            }),
+            DropHit::None => Some(NativeDropCommand::ImportFiles(read_paths_from_data_object(
+                pdataobj,
+            )?)),
+            // Our own items dropped back on an empty area: nothing to do.
+            DropHit::OwnDragBackground => None,
         };
 
-        shared.push_command(command);
+        if let Some(command) = command {
+            shared.push_command(command);
+        }
         shared.set_drag_active(false);
         shared.set_inbound_drag_active(false);
         shared.set_hovered_target(None);
 
         unsafe {
-            *pdweffect = WindowDropTarget::current_effect(target);
+            *pdweffect = WindowDropTarget::current_effect(&hit);
         }
         Ok(())
     }
@@ -389,6 +434,9 @@ impl DragDropBackend for WindowsDragDropBackend {
         let drop_source: IDropSource = FileDropSource.into();
         let mut effect = DROPEFFECT(0);
         self.shared.set_drag_active(true);
+        self.shared
+            .outbound_drag_active
+            .store(true, Ordering::Release);
         let result = unsafe {
             DoDragDrop(
                 &data_object,
@@ -397,6 +445,9 @@ impl DragDropBackend for WindowsDragDropBackend {
                 &mut effect,
             )
         };
+        self.shared
+            .outbound_drag_active
+            .store(false, Ordering::Release);
         self.shared.set_drag_active(false);
         self.shared.set_hovered_target(None);
 

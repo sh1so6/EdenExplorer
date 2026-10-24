@@ -1,0 +1,18 @@
+# Baseline (HEAD) frame cost: explorer only, then the old full-screen tags mode.
+#   ./scripts/ui-probe.ps1 -Script scripts/probe/tags_perf_base.txt -Seed scripts/probe/seed_tags -Exe target/probe-baseline/release/EdenExplorer.exe
+size 1117 717
+wait_ms 1500
+move 700 600
+# explorer only
+wait_ms 2000
+wait_ms 2000
+wait_ms 2000
+# old tags mode
+click 131 18
+move 700 600
+wait_ms 1000
+wait_ms 2000
+wait_ms 2000
+wait_ms 2000
+shot out/tags_base_1_tags_mode.png
+quit

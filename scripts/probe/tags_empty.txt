@@ -1,0 +1,10 @@
+# Sidebar Tags section and dock without any tags (run without a seed).
+#   ./scripts/ui-probe.ps1 -Script scripts/probe/tags_empty.txt
+size 1117 717
+wait_ms 1500
+shot out/tags_empty_0_sidebar.png
+click 107 18
+move 700 300
+wait_ms 300
+shot out/tags_empty_1_dock.png
+quit

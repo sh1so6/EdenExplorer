@@ -573,3 +573,182 @@ pub fn selection_paths_after_paste(
 
     pasted_paths
 }
+
+/// Case-insensitive comparison key for a Windows path: `/` becomes `\`,
+/// repeated and trailing separators are dropped and a verbatim `\\?\`
+/// prefix is removed. Pure string work (no file system or network access).
+fn path_compare_key(path: &Path) -> String {
+    let raw = path.to_string_lossy();
+    let mut text: &str = &raw;
+    let mut key = String::with_capacity(text.len());
+
+    if let Some(rest) = text
+        .strip_prefix(r"\\?\UNC\")
+        .or_else(|| text.strip_prefix("//?/UNC/"))
+    {
+        key.push_str(r"\\");
+        text = rest;
+    } else if let Some(rest) = text
+        .strip_prefix(r"\\?\")
+        .or_else(|| text.strip_prefix("//?/"))
+    {
+        text = rest;
+    } else if text.starts_with(r"\\") || text.starts_with("//") {
+        // UNC share: keep the leading double separator.
+        key.push_str(r"\\");
+        text = &text[2..];
+    }
+
+    let mut previous_was_separator = !key.is_empty();
+    for ch in text.chars() {
+        if ch == '\\' || ch == '/' {
+            if !previous_was_separator {
+                key.push('\\');
+            }
+            previous_was_separator = true;
+        } else {
+            key.extend(ch.to_lowercase());
+            previous_was_separator = false;
+        }
+    }
+
+    while key.len() > 2 && key.ends_with('\\') {
+        key.pop();
+    }
+    if key.len() <= 2 && key != r"\\" && key.ends_with('\\') {
+        key.pop();
+    }
+    key
+}
+
+/// Filters the sources of an internal move (drag & drop) against the target
+/// folder and returns only the sources whose move would change anything.
+///
+/// A source is dropped when its parent folder is `target_dir` (dropped back
+/// where it came from), when it is `target_dir` itself (a folder dropped on
+/// itself), or when `target_dir` lies inside it (a folder moved into its own
+/// descendant). Paths are compared like Windows does: case-insensitively,
+/// ignoring trailing separators and treating `/` and `\` the same.
+///
+/// Pure string comparison, O(sources) and only run on a drop.
+pub fn effective_move_sources(sources: &[PathBuf], target_dir: &Path) -> Vec<PathBuf> {
+    let target_key = path_compare_key(target_dir);
+    if target_key.is_empty() {
+        return Vec::new();
+    }
+
+    sources
+        .iter()
+        .filter(|source| {
+            let source_key = path_compare_key(source);
+            if source_key.is_empty() {
+                return false;
+            }
+
+            // Same folder or the folder itself / one of its descendants.
+            let target_inside_source = target_key
+                .strip_prefix(source_key.as_str())
+                .is_some_and(|rest| rest.is_empty() || rest.starts_with('\\'));
+            if target_inside_source {
+                return false;
+            }
+
+            let parent_key = source_key
+                .rfind('\\')
+                .map(|index| &source_key[..index])
+                .filter(|parent| !parent.is_empty() && *parent != r"\");
+            parent_key != Some(target_key.as_str())
+        })
+        .cloned()
+        .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{effective_move_sources, path_compare_key};
+    use std::path::{Path, PathBuf};
+
+    fn paths(items: &[&str]) -> Vec<PathBuf> {
+        items.iter().map(PathBuf::from).collect()
+    }
+
+    #[test]
+    fn compare_key_normalizes_case_separators_and_trailing_slashes() {
+        assert_eq!(path_compare_key(Path::new(r"C:\Foo\Bar\")), r"c:\foo\bar");
+        assert_eq!(path_compare_key(Path::new("c:/foo//bar/")), r"c:\foo\bar");
+        assert_eq!(path_compare_key(Path::new(r"C:\")), "c:");
+        assert_eq!(path_compare_key(Path::new("C:")), "c:");
+        assert_eq!(path_compare_key(Path::new(r"\\?\C:\Foo")), r"c:\foo");
+        assert_eq!(
+            path_compare_key(Path::new(r"\\Server\Share\Dir\")),
+            r"\\server\share\dir"
+        );
+        assert_eq!(
+            path_compare_key(Path::new(r"\\?\UNC\Server\Share")),
+            r"\\server\share"
+        );
+    }
+
+    #[test]
+    fn same_folder_drop_is_ineffective() {
+        let sources = paths(&[r"C:\Data\a.txt", r"C:\Data\dir"]);
+        assert!(effective_move_sources(&sources, Path::new(r"C:\Data")).is_empty());
+        assert!(effective_move_sources(&sources, Path::new(r"c:/data/")).is_empty());
+        assert!(effective_move_sources(&sources, Path::new(r"C:\DATA\")).is_empty());
+    }
+
+    #[test]
+    fn folder_onto_itself_or_descendant_is_ineffective() {
+        let sources = paths(&[r"C:\Data\dir"]);
+        assert!(effective_move_sources(&sources, Path::new(r"C:\Data\dir")).is_empty());
+        assert!(effective_move_sources(&sources, Path::new(r"c:\data\DIR\")).is_empty());
+        assert!(effective_move_sources(&sources, Path::new(r"C:\Data\dir\sub\x")).is_empty());
+    }
+
+    #[test]
+    fn sibling_with_shared_prefix_is_effective() {
+        // "dir2" starts with "dir" but is not inside it.
+        let sources = paths(&[r"C:\Data\dir"]);
+        assert_eq!(
+            effective_move_sources(&sources, Path::new(r"C:\Data\dir2")),
+            sources
+        );
+    }
+
+    #[test]
+    fn only_effective_sources_remain() {
+        let sources = paths(&[
+            r"C:\Data\a.txt",
+            r"C:\Data\dirA",
+            r"C:\Other\b.txt",
+            r"C:\Data\dirB",
+        ]);
+        assert_eq!(
+            effective_move_sources(&sources, Path::new(r"C:\Data\dirA")),
+            paths(&[r"C:\Data\a.txt", r"C:\Other\b.txt", r"C:\Data\dirB"])
+        );
+    }
+
+    #[test]
+    fn moves_to_other_folders_and_drive_roots() {
+        let sources = paths(&[r"C:\Data\a.txt"]);
+        assert_eq!(effective_move_sources(&sources, Path::new(r"D:\")), sources);
+        assert_eq!(effective_move_sources(&sources, Path::new(r"C:\")), sources);
+        // Already at the drive root.
+        let root_file = paths(&[r"C:\a.txt"]);
+        assert!(effective_move_sources(&root_file, Path::new(r"C:\")).is_empty());
+        assert!(effective_move_sources(&root_file, Path::new("c:")).is_empty());
+        // A whole drive can never be moved into itself.
+        assert!(effective_move_sources(&paths(&[r"C:\"]), Path::new(r"C:\x")).is_empty());
+    }
+
+    #[test]
+    fn unc_paths_compare_by_share() {
+        let sources = paths(&[r"\\Server\Share\a.txt"]);
+        assert!(effective_move_sources(&sources, Path::new(r"\\server\share\")).is_empty());
+        assert_eq!(
+            effective_move_sources(&sources, Path::new(r"\\server\share\sub")),
+            sources
+        );
+    }
+}

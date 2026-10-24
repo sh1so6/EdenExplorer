@@ -1,0 +1,8 @@
+# Tag row context menu: "Show in tags panel".
+#   ./scripts/ui-probe.ps1 -Script scripts/probe/tags_context_menu.txt -Seed scripts/probe/seed_tags
+size 1117 717
+wait_ms 1500
+click 80 316 right
+move 120 330
+wait_ms 300
+shot out/tags_ctx_0_menu.png

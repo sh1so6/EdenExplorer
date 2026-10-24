@@ -6,27 +6,120 @@ use crate::gui::utils::{clickable_icon, draw_object_drag_ghost, rgba_color_edit_
 use crate::gui::windows::containers::enums::{ItemViewerAction, ItemViewerContextAction};
 use crate::gui::windows::containers::sidebar::draw_sidebar_item;
 use crate::gui::windows::containers::structs::TagsState;
-use crate::gui::windows::windowsoverrides::handle_draw_windows_buttons;
 use eframe::egui;
 use egui::FontId;
 use egui::ScrollArea;
 use egui::containers::{Popup, PopupCloseBehavior};
 use egui_phosphor::regular;
 use std::path::PathBuf;
-use windows::Win32::Foundation::HWND;
 
+/// Default height of the tags panel docked below the explorer content.
+pub const TAGS_DOCK_DEFAULT_HEIGHT: f32 = 240.0;
+/// Smallest height the docked tags panel can be resized to.
+pub const TAGS_DOCK_MIN_HEIGHT: f32 = 100.0;
+/// Upper bound for a stored dock height. At draw time the height is also
+/// limited by the window, so this only rejects nonsensical stored values.
+pub const TAGS_DOCK_MAX_HEIGHT: f32 = 4000.0;
+
+/// Smallest height kept for the explorer content above the tags dock.
+const TAGS_DOCK_CONTENT_MIN_HEIGHT: f32 = 150.0;
+/// Height of the resize separator between the content and the dock.
+const TAGS_DOCK_SEPARATOR_HEIGHT: f32 = 6.0;
+/// Below this height (tiny window) the dock is not drawn at all.
+const TAGS_DOCK_HIDE_BELOW: f32 = 40.0;
+/// The explorer content container's left margin; the dock lines up with it.
+const TAGS_DOCK_LEFT_INSET: f32 = 3.0;
+
+/// Where the explorer content, the resize separator and the docked tags
+/// panel go inside the explorer content area.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct TagsDockLayout {
+    pub content: egui::Rect,
+    pub separator: egui::Rect,
+    pub panel: egui::Rect,
+    /// Panel height actually drawn (the preference clamped to the window).
+    pub height: f32,
+    pub min_height: f32,
+    pub max_height: f32,
+}
+
+/// Splits `area` into explorer content (top) and tags dock (bottom) for a
+/// preferred dock height. The content keeps at least
+/// `TAGS_DOCK_CONTENT_MIN_HEIGHT`, so in a small window the dock shrinks first
+/// (below its own minimum if needed) and is hidden (`None`) when it would be
+/// unusably small.
+pub fn layout_tags_dock(
+    area: egui::Rect,
+    preferred_height: f32,
+    pixels_per_point: f32,
+) -> Option<TagsDockLayout> {
+    let max_height =
+        (area.height() - TAGS_DOCK_CONTENT_MIN_HEIGHT - TAGS_DOCK_SEPARATOR_HEIGHT).max(0.0);
+    let min_height = TAGS_DOCK_MIN_HEIGHT.min(max_height);
+    let preferred = if preferred_height.is_finite() {
+        preferred_height
+    } else {
+        TAGS_DOCK_DEFAULT_HEIGHT
+    };
+    let height = preferred.clamp(min_height, max_height);
+    if height < TAGS_DOCK_HIDE_BELOW {
+        return None;
+    }
+
+    let ppp = pixels_per_point.max(0.01);
+    let panel_top = ((area.bottom() - height) * ppp).round() / ppp;
+    let separator_top = panel_top - TAGS_DOCK_SEPARATOR_HEIGHT;
+    let left = area.left() + TAGS_DOCK_LEFT_INSET;
+    Some(TagsDockLayout {
+        content: egui::Rect::from_min_max(area.min, egui::pos2(area.right(), separator_top)),
+        separator: egui::Rect::from_min_max(
+            egui::pos2(left, separator_top),
+            egui::pos2(area.right(), panel_top),
+        ),
+        panel: egui::Rect::from_min_max(egui::pos2(left, panel_top), area.max),
+        height,
+        min_height,
+        max_height,
+    })
+}
+
+/// What happened in the docked tags panel this frame.
+#[derive(Default)]
+pub struct TagsPanelResponse {
+    /// Tags were edited (renamed, recolored, reordered); persist them.
+    pub changed: bool,
+    /// The panel's close button was clicked.
+    pub close_requested: bool,
+}
+
+/// Height of the docked panel's header row (tag icon, title, close button).
+const TAGS_DOCK_HEADER_HEIGHT: f32 = 28.0;
+/// How long a tag focused from the sidebar stays highlighted.
+pub const TAG_FOCUS_HIGHLIGHT: std::time::Duration = std::time::Duration::from_millis(1000);
+
+/// Draws the tags panel docked below the explorer content: a slim header
+/// (title + close button) and the tag groups. `focused` paints the accent
+/// line that shows the panel has keyboard focus (explorer shortcuts are off).
 pub fn draw_tags(
     ui: &mut egui::Ui,
     i18n: &I18n,
     icon_cache: &IconCache,
     palette: &ThemePalette,
-    hwnd: Option<HWND>,
     tags_state: &mut TagsState,
-) -> bool {
+    focused: bool,
+) -> TagsPanelResponse {
     let mut changed = false;
+    let mut close_requested = false;
     let mut drag_state = tags_state.drag_state.take();
     let mut rename_state = tags_state.rename_state.take();
     let mut delete_confirmation = tags_state.delete_confirmation.take();
+    let pending_focus = tags_state.pending_focus.take();
+    let highlight = tags_state
+        .highlight
+        .filter(|(_, since)| since.elapsed() < TAG_FOCUS_HIGHLIGHT);
+    if highlight.is_none() {
+        tags_state.highlight = None;
+    }
     let pointer_pos = ui.ctx().input(|input| input.pointer.hover_pos());
     let pointer_released = ui.ctx().input(|input| input.pointer.primary_released());
     let groups_len = tags_state.groups.len();
@@ -38,29 +131,29 @@ pub fn draw_tags(
         |ui| {
             ui.spacing_mut().item_spacing.y = 0.0;
 
-            egui::Frame::NONE.show(ui, |ui| {
-                ui.add_space(8.0);
-                draw_container_header(
-                    i18n,
-                    ui,
-                    palette,
-                    hwnd
-                );
-            });
+            if draw_dock_header(ui, i18n, palette, focused) {
+                close_requested = true;
+            }
 
                 if tags_state.groups.is_empty() {
                     ui.centered_and_justified(|ui| {
-                        ui.label(i18n.tr("tag_empty_state"));
+                        ui.label(
+                            egui::RichText::new(i18n.tr("tag_empty_state"))
+                                .size(palette.text_size)
+                                .color(ui.visuals().weak_text_color()),
+                        );
                     });
                     return;
                 }
 
                 ScrollArea::vertical()
+                    .id_salt("tags_dock_scroll")
+                    .auto_shrink([false; 2])
                     .max_height(ui.available_height())
                     .min_scrolled_height(ui.available_height())
                     .show(ui, |ui| {
                 ui.vertical(|ui| {
-                    ui.add_space(-4.0); // align the first group vertically with the side bar border
+                    ui.add_space(-4.0); // tighten the gap below the dock header
                     ui.spacing_mut().item_spacing.y = 8.0;
 
                     for group_index in 0..groups_len {
@@ -68,6 +161,13 @@ pub fn draw_tags(
                         let group_name = tags_state.groups[group_index].name.clone();
                         let group_items = tags_state.groups[group_index].items.clone();
                         let group_color = tags_state.groups[group_index].color;
+                        let focus_this_group = pending_focus == Some(group_id);
+                        let highlight_alpha = highlight
+                            .filter(|(id, _)| *id == group_id)
+                            .map(|(_, since)| {
+                                1.0 - since.elapsed().as_secs_f32()
+                                    / TAG_FOCUS_HIGHLIGHT.as_secs_f32()
+                            });
                         let editing_this_group = rename_state
                             .as_ref()
                             .map(|state| state.group_id == group_id)
@@ -87,16 +187,20 @@ pub fn draw_tags(
                             .fill(egui::Color32::TRANSPARENT)
                             .inner_margin(egui::Margin::symmetric(10, 10));
 
-                        group_frame.show(ui, |ui| {
+                        let group_response = group_frame.show(ui, |ui| {
                             ui.set_width(ui.available_width());
 
                             let header_id = ui.make_persistent_id(("tag_group", group_id));
-                            let header_state =
+                            let mut header_state =
                                 egui::collapsing_header::CollapsingState::load_with_default_open(
                                     ui.ctx(),
                                     header_id,
                                     true,
                                 );
+                            if focus_this_group {
+                                // Focused from the sidebar: always show its objects.
+                                header_state.set_open(true);
+                            }
 
                             let header_response = header_state.show_header(ui, |ui| {
                                 if editing_this_group {
@@ -181,7 +285,7 @@ pub fn draw_tags(
                                 );
                             });
 
-                            let _ = header_response.body(|ui| {
+                            let (_, header_inner, _) = header_response.body(|ui| {
                                 let collapsible_body_frame = egui::Frame::NONE
                                     .stroke(egui::Stroke::new(1.0, group_color.gamma_multiply(0.8)))
                                     .fill(palette.row_bg.linear_multiply(0.18))
@@ -221,7 +325,18 @@ pub fn draw_tags(
 
                                     for (item_index, path) in group_items.iter().enumerate() {
                                         let label = tag_item_label(path);
-                                        let is_dir = path.is_dir();
+                                        // Cached: a file system stat per row per frame
+                                        // is too slow for large tags.
+                                        let is_dir = match tags_state.is_dir_cache.get(path) {
+                                            Some(is_dir) => *is_dir,
+                                            None => {
+                                                let is_dir = path.is_dir();
+                                                tags_state
+                                                    .is_dir_cache
+                                                    .insert(path.clone(), is_dir);
+                                                is_dir
+                                            }
+                                        };
                                         let resp = if drag_is_active {
                                             let rect = item_rects[item_index];
                                             let item_resp = item_responses[item_index].clone();
@@ -378,7 +493,31 @@ pub fn draw_tags(
                             {
                                 rename_state = None;
                             }
+                            header_inner.response.rect
                         });
+
+                        if focus_this_group {
+                            group_response.response.scroll_to_me(Some(egui::Align::TOP));
+                            ui.ctx().request_repaint();
+                        }
+                        if let Some(alpha) = highlight_alpha {
+                            // Brief outline around the header row that fades out,
+                            // so the eye finds the group that was just focused.
+                            let header_rect = group_response
+                                .inner
+                                .expand2(egui::vec2(6.0, 3.0))
+                                .intersect(group_response.response.rect);
+                            ui.painter().rect_stroke(
+                                header_rect,
+                                egui::CornerRadius::same(palette.medium_radius),
+                                egui::Stroke::new(
+                                    2.0,
+                                    palette.primary_active.gamma_multiply(alpha.clamp(0.0, 1.0)),
+                                ),
+                                egui::StrokeKind::Inside,
+                            );
+                            ui.ctx().request_repaint();
+                        }
 
                         if should_clear_drag {
                             drag_state = None;
@@ -399,7 +538,60 @@ pub fn draw_tags(
     tags_state.drag_state = drag_state;
     tags_state.rename_state = rename_state;
     tags_state.delete_confirmation = delete_confirmation;
-    changed
+    TagsPanelResponse {
+        changed,
+        close_requested,
+    }
+}
+
+/// Slim header of the docked tags panel: tag icon + title on the left, close
+/// button on the right. Returns whether the close button was clicked.
+fn draw_dock_header(ui: &mut egui::Ui, i18n: &I18n, palette: &ThemePalette, focused: bool) -> bool {
+    let (rect, _) = ui.allocate_exact_size(
+        egui::vec2(ui.available_width(), TAGS_DOCK_HEADER_HEIGHT),
+        egui::Sense::hover(),
+    );
+    if focused {
+        // Same accent as a focused split pane.
+        ui.painter().hline(
+            rect.x_range(),
+            rect.top() + 1.0,
+            egui::Stroke::new(2.0, palette.borders_active),
+        );
+    }
+
+    let mut close = false;
+    let mut header_ui = ui.new_child(
+        egui::UiBuilder::new()
+            .id_salt("tags_dock_header")
+            .max_rect(rect.shrink2(egui::vec2(10.0, 0.0)))
+            .layout(egui::Layout::left_to_right(egui::Align::Center)),
+    );
+    header_ui.label(
+        egui::RichText::new(regular::TAG)
+            .size(palette.text_size + 2.0)
+            .color(palette.icon_color),
+    );
+    header_ui.label(
+        egui::RichText::new(i18n.tr("tags"))
+            .size(palette.text_size)
+            .color(palette.text_header_section)
+            .strong(),
+    );
+    header_ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+        if clickable_icon(ui, regular::X, palette)
+            .on_hover_text(
+                egui::RichText::new(i18n.tr("tooltip_hide_tags_panel"))
+                    .size(palette.tooltip_text_size)
+                    .color(palette.tooltip_text_color),
+            )
+            .on_hover_cursor(egui::CursorIcon::PointingHand)
+            .clicked()
+        {
+            close = true;
+        }
+    });
+    close
 }
 
 pub fn draw_delete_confirmation_popup(
@@ -736,54 +928,6 @@ fn draw_insert_line(ui: &mut egui::Ui, palette: &ThemePalette, y: f32, left: f32
     );
 }
 
-pub fn draw_container_header(
-    i18n: &I18n,
-    ui: &mut egui::Ui,
-    palette: &ThemePalette,
-    hwnd: Option<HWND>,
-) {
-    let controls_width = 64.0;
-    let full_width = ui.available_width();
-    let tabs_width = (full_width - controls_width).max(0.0);
-
-    ui.allocate_ui_with_layout(
-        egui::vec2(ui.available_width(), 32.0),
-        egui::Layout::left_to_right(egui::Align::Center),
-        |ui| {
-            ui.allocate_ui_with_layout(
-                egui::vec2(tabs_width, 32.0),
-                egui::Layout::left_to_right(egui::Align::Min),
-                |ui| {
-                    let tabs_rect = ui.available_rect_before_wrap();
-                    let empty_left = tabs_rect.min.x;
-                    let drag_rect = egui::Rect::from_min_max(
-                        egui::pos2(empty_left, tabs_rect.min.y),
-                        tabs_rect.max,
-                    );
-                    if drag_rect.width() > 4.0 {
-                        let resp = ui.allocate_rect(drag_rect, egui::Sense::click_and_drag());
-                        if (resp.drag_started() || resp.dragged()) && !crate::core::probe_active() {
-                            ui.ctx().send_viewport_cmd(egui::ViewportCommand::StartDrag);
-                        }
-                        if resp.hovered() {
-                            ui.ctx().set_cursor_icon(egui::CursorIcon::Grab);
-                        }
-                    }
-                },
-            );
-
-            // --- RIGHT SIDE ---
-            ui.allocate_ui_with_layout(
-                egui::vec2(controls_width, 32.0),
-                egui::Layout::right_to_left(egui::Align::Center),
-                |ui| {
-                    handle_draw_windows_buttons(i18n, ui, hwnd, palette);
-                },
-            );
-        },
-    );
-}
-
 fn handle_context_menu_actions_tags(
     ui: &mut egui::Ui,
     i18n: &I18n,
@@ -872,4 +1016,62 @@ fn handle_row_click(object: &FileItem) -> Option<ItemViewerAction> {
     } else {
         ItemViewerAction::OpenWithDefault(vec![object.path.clone()])
     });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn area(height: f32) -> egui::Rect {
+        egui::Rect::from_min_size(egui::pos2(10.0, 40.0), egui::vec2(800.0, height))
+    }
+
+    #[test]
+    fn dock_layout_uses_preferred_height_when_it_fits() {
+        let layout = layout_tags_dock(area(700.0), 240.0, 1.0).unwrap();
+        assert_eq!(layout.height, 240.0);
+        assert_eq!(layout.panel.height(), 240.0);
+        assert_eq!(layout.panel.bottom(), 740.0);
+        assert_eq!(layout.separator.height(), TAGS_DOCK_SEPARATOR_HEIGHT);
+        assert_eq!(layout.separator.bottom(), layout.panel.top());
+        assert_eq!(layout.content.bottom(), layout.separator.top());
+        assert_eq!(layout.content.left(), 10.0);
+        assert_eq!(layout.panel.left(), 10.0 + TAGS_DOCK_LEFT_INSET);
+        assert_eq!(layout.max_height, 700.0 - 150.0 - 6.0);
+    }
+
+    #[test]
+    fn dock_layout_keeps_content_minimum_and_shrinks_dock_first() {
+        // Preference larger than the window allows: the content keeps 150.
+        let layout = layout_tags_dock(area(500.0), 1000.0, 1.0).unwrap();
+        assert_eq!(layout.content.height(), TAGS_DOCK_CONTENT_MIN_HEIGHT);
+        assert_eq!(layout.height, 500.0 - 150.0 - 6.0);
+
+        // Preference below the minimum is raised to it.
+        let layout = layout_tags_dock(area(700.0), 20.0, 1.0).unwrap();
+        assert_eq!(layout.height, TAGS_DOCK_MIN_HEIGHT);
+
+        // Small window: the dock goes below its own minimum before the content
+        // loses space...
+        let layout = layout_tags_dock(area(220.0), 240.0, 1.0).unwrap();
+        assert_eq!(layout.height, 220.0 - 150.0 - 6.0);
+        assert_eq!(layout.content.height(), TAGS_DOCK_CONTENT_MIN_HEIGHT);
+
+        // ...and disappears when it would be unusably small.
+        assert!(layout_tags_dock(area(180.0), 240.0, 1.0).is_none());
+        assert!(layout_tags_dock(area(0.0), 240.0, 1.0).is_none());
+    }
+
+    #[test]
+    fn dock_layout_rejects_non_finite_preference() {
+        let layout = layout_tags_dock(area(700.0), f32::NAN, 1.0).unwrap();
+        assert_eq!(layout.height, TAGS_DOCK_DEFAULT_HEIGHT);
+    }
+
+    #[test]
+    fn dock_layout_snaps_panel_top_to_pixels() {
+        let layout = layout_tags_dock(area(700.3), 240.0, 1.5).unwrap();
+        let top_px = layout.panel.top() * 1.5;
+        assert!((top_px - top_px.round()).abs() < 1e-3);
+    }
 }

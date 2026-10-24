@@ -19,7 +19,8 @@ use windows::Win32::Globalization::GetUserDefaultUILanguage;
 use windows::Win32::System::DataExchange::COPYDATASTRUCT;
 use windows::Win32::System::Threading::{CreateMutexW, ReleaseMutex};
 use windows::Win32::UI::WindowsAndMessaging::{
-    FindWindowW, SW_RESTORE, SendMessageW, SetForegroundWindow, ShowWindow, WM_COPYDATA,
+    FindWindowW, IsIconic, SW_RESTORE, SendMessageW, SetForegroundWindow, ShowWindow,
+    WM_COPYDATA,
 };
 use windows::core::PCWSTR;
 
@@ -355,7 +356,10 @@ fn forward_paths(paths: &[PathBuf]) -> Result<(), LaunchError> {
         return Err(LaunchError::WindowRejected);
     }
     unsafe {
-        let _ = ShowWindow(hwnd, SW_RESTORE);
+        // Only un-minimize: SW_RESTORE on a maximized window would shrink it.
+        if IsIconic(hwnd).as_bool() {
+            let _ = ShowWindow(hwnd, SW_RESTORE);
+        }
         let _ = SetForegroundWindow(hwnd);
     }
     Ok(())

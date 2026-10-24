@@ -2459,7 +2459,6 @@ pub fn draw_empty_item_viewer_area(
     is_drive_view: bool,
     is_recycle_bin_view: bool,
     current_dir: &PathBuf,
-    drag_state: &DragState,
     modal_input_blocked: bool,
     show_loading_spinner: bool,
 ) -> Option<ItemViewerAction> {
@@ -2487,16 +2486,16 @@ pub fn draw_empty_item_viewer_area(
 
     let mut action = None;
 
-    if drag_state.active && ui.input(|input| input.pointer.primary_released()) && response.hovered()
-    {
-        action = Some(ItemViewerAction::MoveItems {
-            sources: drag_state.source_items.clone(),
-            target_dir: current_dir.clone(),
-        });
-    }
+    // An internal drag released over the empty folder area is not a move
+    // target (only folder rows, breadcrumbs, tabs and favorites are).
 
     if modal_input_blocked {
         return action;
+    }
+
+    // Double-click on the empty folder area goes up one level.
+    if response.double_clicked() {
+        action = Some(ItemViewerAction::NavigateUp);
     }
 
     if !is_drive_view && !is_recycle_bin_view {

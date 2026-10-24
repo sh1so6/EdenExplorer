@@ -11,10 +11,12 @@ use crate::gui::i18n::I18n;
 use crate::gui::theme::{
     ThemeMode, ThemePalette, apply_font_to_context, get_default_palette, set_palette,
 };
+use crate::gui::utils::shortcut;
 use crate::gui::utils::{
     ClipboardFileRead, FileOpKind, FileOpProgress, SortColumn, SortKey, directory_child_paths,
-    file_op_async, is_clipboard_cut, read_clipboard_files, restore_paths_native,
-    selection_paths_after_paste, set_clipboard_files, show_copy_move_dialog, sort_files_by_keys,
+    effective_move_sources, file_op_async, is_clipboard_cut, read_clipboard_files,
+    restore_paths_native, selection_paths_after_paste, set_clipboard_files, show_copy_move_dialog,
+    sort_files_by_keys,
 };
 use crate::gui::windows::about::draw_about_window;
 use crate::gui::windows::containers::enums::{
@@ -477,6 +479,8 @@ impl MainWindow {
             vertical_tabs_width: self.settings_window.current_settings.vertical_tabs_width,
             sidebar_width: self.sidebar_state.sidebar_default_width,
             sidebar_collapsed: self.sidebar_collapsed,
+            tags_dock_open: self.tags_dock_open,
+            tags_dock_height: self.tags_dock_height,
         });
     }
 
@@ -1877,6 +1881,9 @@ impl MainWindow {
     }
 
     fn move_selected_paths_to_dir(&mut self, sources: &[PathBuf], target_dir: PathBuf) {
+        // Dropping items where they already are (or a folder into itself)
+        // is a no-op: no file operation, no reload, selection kept.
+        let sources = effective_move_sources(sources, &target_dir);
         if sources.is_empty() {
             return;
         }
@@ -1895,7 +1902,7 @@ impl MainWindow {
             )
             .unwrap();
 
-            for source in sources {
+            for source in &sources {
                 let source_item: IShellItem = SHCreateItemFromParsingName(
                     &HSTRING::from(source.to_string_lossy().to_string()),
                     None,
@@ -1920,12 +1927,45 @@ impl MainWindow {
         self.load_path();
     }
 
+    /// Opens or closes the tags panel docked below the explorer content and
+    /// persists the choice.
+    pub(crate) fn set_tags_dock_open(&mut self, open: bool) {
+        if !open {
+            self.tags_dock_focused = false;
+            self.tags_state.focused_group = None;
+            self.tags_state.pending_focus = None;
+            self.tags_state.drag_state = None;
+            self.tags_state.rename_state = None;
+        }
+        if self.tags_dock_open != open {
+            self.tags_dock_open = open;
+            self.save_layout_settings_to_disk();
+        }
+    }
+
+    /// Returns whether the tags changed (the caller persists them).
     pub fn handle_sidebar_action(
         &mut self,
         sidebar_action: Option<SidebarAction>,
         drag_sources: Option<&[PathBuf]>,
-    ) {
+    ) -> bool {
+        let mut tags_changed = false;
         if let Some(action) = sidebar_action {
+            if let Some(group_id) = action.open_tag {
+                self.set_tags_dock_open(true);
+                self.tags_state.focused_group = Some(group_id);
+                self.tags_state.pending_focus = Some(group_id);
+                self.tags_state.highlight = Some((group_id, Instant::now()));
+            }
+            if let Some(group_id) = action.add_to_tag {
+                // Tagging only: dropped items are never moved or copied.
+                if let Some(sources) = drag_sources
+                    && self.tags_state.add_paths_to_group(group_id, sources)
+                {
+                    tags_changed = true;
+                }
+                self.tags_state.highlight = Some((group_id, Instant::now()));
+            }
             if action.sections_changed {
                 save_sidebar_settings(&SidebarSettingsSnapshot {
                     collapsed: self.sidebar_state.collapsed_sections.to_keys(),
@@ -1977,12 +2017,14 @@ impl MainWindow {
             if let Some(path) = action.remove_favorite {
                 self.remove_favorite(&path);
             }
-            if let Some(target_dir) = action.move_files_to_sidebar_dir.as_ref() {
-                if let Some(sources) = drag_sources {
-                    self.move_selected_paths_to_dir(sources, target_dir.clone());
-                }
+            if action.add_to_tag.is_none()
+                && let Some(target_dir) = action.move_files_to_sidebar_dir.as_ref()
+                && let Some(sources) = drag_sources
+            {
+                self.move_selected_paths_to_dir(sources, target_dir.clone());
             }
         }
+        tags_changed
     }
 
     pub fn handle_topbar_action(&mut self, topbar_action: Option<TopbarAction>) {
@@ -2017,18 +2059,8 @@ impl MainWindow {
                     }
                 }
             }
-            if action.toggle_file_explorer {
-                self.display_file_explorer = !self.display_file_explorer;
-                let tab = self.active_tab_mut();
-                tab.primary_view.drag_state.active = false;
-                tab.primary_view.drag_state.start_pos = None;
-                tab.primary_view.drag_state.source_items.clear();
-                if let Some(split) = tab.split_view.as_mut() {
-                    split.drag_state.active = false;
-                    split.drag_state.start_pos = None;
-                    split.drag_state.source_items.clear();
-                }
-                self.tags_state.drag_state = None;
+            if action.toggle_tags_dock {
+                self.set_tags_dock_open(!self.tags_dock_open);
             }
             if action.toggle_sidebar {
                 self.sidebar_collapsed = !self.sidebar_collapsed;
@@ -2077,7 +2109,6 @@ impl MainWindow {
                 .map(|view| view.explorer_state.non_ntfs_popup_path.is_some())
                 .unwrap_or(false)
             || topbar_menu_open
-            || !self.display_file_explorer
     }
 
     fn enter_address_bar_edit_mode(&mut self) {
@@ -2148,6 +2179,27 @@ impl MainWindow {
                 alt && input.key_pressed(egui::Key::Enter),
             )
         });
+        // The tags dock has keyboard focus (or a tag is being renamed): keys
+        // that act on the explorer selection or create files stay off, so a
+        // keystroke meant for the dock never touches files.
+        let explorer_keys_blocked = self.tags_state.keyboard_captured;
+        let shortcuts = if explorer_keys_blocked {
+            (
+                shortcuts.0,
+                shortcuts.1,
+                shortcuts.2,
+                shortcuts.3,
+                false,
+                shortcuts.5,
+                shortcuts.6,
+                shortcuts.7,
+                false,
+                false,
+                false,
+            )
+        } else {
+            shortcuts
+        };
 
         if shortcuts.0 {
             self.activate_tab_relative(-1);
@@ -2535,6 +2587,59 @@ pub fn calculate_folder_sizes_parallel(
     handles
 }
 
+/// Navigates the focused view of the active tab into `path` (a folder),
+/// remembering the current folder in the navigation history. `opened_item`
+/// is the item the user opened in the current folder (the folder itself, or
+/// the `.lnk` that points to it); it stays selected for when the user comes
+/// back.
+fn navigate_focused_view_to(explorer: &mut MainWindow, path: PathBuf, opened_item: PathBuf) {
+    {
+        let side = explorer.focused_split;
+        let view = explorer.active_tab_mut().view_mut(side);
+        view.explorer_state.selected_paths.clear();
+        view.explorer_state
+            .selected_paths
+            .insert(opened_item.clone());
+        view.item_viewer_filter_state.dirty = true;
+        view.item_viewer_filter_state.cached_indices.clear();
+    }
+    let snapshot =
+        directory_settings_snapshot_for_view(explorer.active_tab().view(explorer.focused_split));
+    let _ = persist_directory_settings_snapshot(
+        &mut explorer.settings_window.current_settings.directory_settings,
+        snapshot,
+    );
+
+    // Store current path in navigation history before navigating
+    if let Some(parent) = explorer.current_nav().get_parent() {
+        let current = explorer.current_nav().current.clone();
+        let side = explorer.focused_split;
+        explorer
+            .active_tab_mut()
+            .view_mut(side)
+            .explorer_state
+            .navigation_history
+            .insert(parent, current);
+    }
+    // Opened through a shortcut: the target is not a child of the current
+    // folder, so Back/Up would not find the item to reselect. Remember the
+    // shortcut as this folder's last visited item instead.
+    if opened_item != path {
+        let current = explorer.current_nav().current.clone();
+        let side = explorer.focused_split;
+        explorer
+            .active_tab_mut()
+            .view_mut(side)
+            .explorer_state
+            .navigation_history
+            .insert(current, opened_item);
+    }
+
+    explorer.current_nav_mut().go_to(path);
+    explorer.mark_tab_infos_dirty();
+    explorer.load_path();
+}
+
 pub fn handle_pending_actions(pending_action: Option<ItemViewerAction>, explorer: &mut MainWindow) {
     if let Some(action) = pending_action {
         let side = explorer.focused_split;
@@ -2868,41 +2973,33 @@ pub fn handle_pending_actions(pending_action: Option<ItemViewerAction>, explorer
                     view.explorer_state.selection_focus = Some(focus);
                 }
             }
-            ItemViewerAction::Open(path) => {
-                {
-                    let side = explorer.focused_split;
-                    let view = explorer.active_tab_mut().view_mut(side);
-                    view.explorer_state.selected_paths.clear();
-                    view.explorer_state.selected_paths.insert(path.clone());
-                    view.item_viewer_filter_state.dirty = true;
-                    view.item_viewer_filter_state.cached_indices.clear();
-                }
-                let snapshot = directory_settings_snapshot_for_view(
-                    explorer.active_tab().view(explorer.focused_split),
-                );
-                let _ = persist_directory_settings_snapshot(
-                    &mut explorer.settings_window.current_settings.directory_settings,
-                    snapshot,
-                );
-
-                // Store current path in navigation history before navigating
-                if let Some(parent) = explorer.current_nav().get_parent() {
-                    let current = explorer.current_nav().current.clone();
-                    let side = explorer.focused_split;
-                    explorer
-                        .active_tab_mut()
-                        .view_mut(side)
-                        .explorer_state
-                        .navigation_history
-                        .insert(parent, current);
-                }
-
-                explorer.current_nav_mut().go_to(path);
-                explorer.mark_tab_infos_dirty();
-                explorer.load_path();
-            }
+            ItemViewerAction::Open(path) => navigate_focused_view_to(explorer, path.clone(), path),
             ItemViewerAction::OpenWithDefault(paths) => {
+                // Shortcuts to folders open inside Eden, like Windows Explorer
+                // opens them in the same window, instead of launching a new
+                // Explorer window through the shell. Everything else
+                // (files, programs, shortcuts to files/programs, broken or
+                // non-file-system shortcuts) goes to the shell below.
+                let mut folder_targets = Vec::new();
+                let mut shell_paths = Vec::with_capacity(paths.len());
                 for path in paths {
+                    match shortcut::resolve_shortcut_directory(&path) {
+                        Some(target) => folder_targets.push((target, path)),
+                        None => shell_paths.push(path),
+                    }
+                }
+                let mut folder_targets = folder_targets.into_iter();
+                if let Some((target, link)) = folder_targets.next() {
+                    navigate_focused_view_to(explorer, target, link);
+                }
+                // Further folder shortcuts in a multi-selection open in new
+                // tabs (Explorer opens one window each).
+                for (target, _) in folder_targets {
+                    explorer.open_new_tab(target);
+                    explorer.load_path();
+                }
+
+                for path in shell_paths {
                     let wide_path: Vec<u16> = path
                         .as_os_str()
                         .encode_wide()
@@ -2912,7 +3009,9 @@ pub fn handle_pending_actions(pending_action: Option<ItemViewerAction>, explorer
                     // process. This is especially important for scripts:
                     // `%CD%` should refer to the folder the user opened the
                     // script from, rather than Eden Explorer's startup
-                    // directory.
+                    // directory. For a `.lnk` this is only a fallback: the
+                    // shell applies the shortcut's own target, arguments and
+                    // "Start in" folder, as Explorer does.
                     let wide_working_dir = path.parent().map(|parent| {
                         parent
                             .as_os_str()
@@ -2934,7 +3033,8 @@ pub fn handle_pending_actions(pending_action: Option<ItemViewerAction>, explorer
                             SW_SHOWNORMAL,
                         );
 
-                        if result.0 <= std::ptr::null_mut() {
+                        // Values of 32 or less are error codes.
+                        if result.0 as isize <= 32 {
                             eprintln!("Failed to open file: {}", path.display());
                         }
                     }
@@ -3028,7 +3128,16 @@ pub fn handle_pending_actions(pending_action: Option<ItemViewerAction>, explorer
                     }
                 }
 
-                let existing_sources: Vec<PathBuf> = sources
+                // Evaluate the paths first: items dropped where they already
+                // are, a folder dropped onto itself or into its own descendant
+                // are skipped. When nothing is left, do nothing at all (no
+                // file operation, reload, selection change or tag rewrite).
+                let effective_sources = effective_move_sources(&sources, &target_dir);
+                if effective_sources.is_empty() {
+                    return;
+                }
+
+                let existing_sources: Vec<PathBuf> = effective_sources
                     .into_iter()
                     .filter(|source| source.exists())
                     .collect();
@@ -3093,6 +3202,8 @@ pub fn handle_pending_actions(pending_action: Option<ItemViewerAction>, explorer
 
                 explorer.save_or_defer_column_settings_to_disk(finished);
             }
+            // Handled per pane in `draw_tab_content` (becomes a nav Up action).
+            ItemViewerAction::NavigateUp => {}
         }
     }
 }

@@ -1,0 +1,25 @@
+# Renaming a tag in the dock while an explorer item is selected: Delete and
+# typed text must stay in the rename field (beta.txt must survive).
+# Needs %TEMP%\eden-tag-drop\src\{alpha,beta,gamma}.txt and
+#   ./scripts/ui-probe.ps1 -Script scripts/probe/tags_rename_keys.txt -Seed scripts/probe/seed_tags_drag
+size 1117 717
+wait_ms 1200
+click 80 175
+move 700 600
+wait_ms 800
+click 80 250
+click 330 124
+move 700 300
+wait_ms 300
+shot out/tags_rename_0_before.png
+click 1002 520
+wait_ms 200
+key Delete
+text Renamed
+wait_ms 200
+shot out/tags_rename_1_typing.png
+key Enter
+move 700 300
+wait_ms 300
+shot out/tags_rename_2_done.png
+quit

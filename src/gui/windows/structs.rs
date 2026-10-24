@@ -107,13 +107,15 @@ pub struct SidebarState {
 pub enum SidebarSection {
     Places,
     Favorites,
+    Tags,
     Storage,
 }
 
 impl SidebarSection {
-    pub const ALL: [SidebarSection; 3] = [
+    pub const ALL: [SidebarSection; 4] = [
         SidebarSection::Places,
         SidebarSection::Favorites,
+        SidebarSection::Tags,
         SidebarSection::Storage,
     ];
 
@@ -122,6 +124,7 @@ impl SidebarSection {
         match self {
             SidebarSection::Places => "places",
             SidebarSection::Favorites => "favorites",
+            SidebarSection::Tags => "tags",
             SidebarSection::Storage => "storage",
         }
     }
@@ -136,6 +139,7 @@ impl SidebarSection {
 pub struct SidebarCollapsedSections {
     places: bool,
     favorites: bool,
+    tags: bool,
     storage: bool,
 }
 
@@ -165,6 +169,7 @@ impl SidebarCollapsedSections {
         match section {
             SidebarSection::Places => self.places,
             SidebarSection::Favorites => self.favorites,
+            SidebarSection::Tags => self.tags,
             SidebarSection::Storage => self.storage,
         }
     }
@@ -173,6 +178,7 @@ impl SidebarCollapsedSections {
         match section {
             SidebarSection::Places => self.places = collapsed,
             SidebarSection::Favorites => self.favorites = collapsed,
+            SidebarSection::Tags => self.tags = collapsed,
             SidebarSection::Storage => self.storage = collapsed,
         }
     }
@@ -211,8 +217,18 @@ mod tests {
             SidebarCollapsedSections::from_keys(&["storage", "bogus", "", "STORAGE", "places"]);
         assert!(collapsed.is_collapsed(SidebarSection::Places));
         assert!(!collapsed.is_collapsed(SidebarSection::Favorites));
+        assert!(!collapsed.is_collapsed(SidebarSection::Tags));
         assert!(collapsed.is_collapsed(SidebarSection::Storage));
         assert_eq!(collapsed.to_keys(), vec!["places", "storage"]);
+
+        // The Tags section (added later) keeps display order in the keys.
+        let mut with_tags = collapsed;
+        with_tags.set(SidebarSection::Tags, true);
+        assert_eq!(with_tags.to_keys(), vec!["places", "tags", "storage"]);
+        assert_eq!(
+            SidebarCollapsedSections::from_keys(&with_tags.to_keys()),
+            with_tags
+        );
 
         let mut collapsed = collapsed;
         collapsed.set(SidebarSection::Places, false);

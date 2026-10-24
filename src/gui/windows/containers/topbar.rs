@@ -23,7 +23,6 @@ const TOPBAR_MIN_DRAG_WIDTH: f32 = 8.0;
 enum ModeIconKind {
     Sidebar,
     Theme,
-    FileExplorer,
     Tags,
     Split,
     VerticalTabs,
@@ -44,15 +43,15 @@ impl ModeIcon {
         match self.kind {
             ModeIconKind::Sidebar => action.toggle_sidebar = true,
             ModeIconKind::Theme => action.toggle_theme = true,
-            ModeIconKind::FileExplorer | ModeIconKind::Tags => action.toggle_file_explorer = true,
+            ModeIconKind::Tags => action.toggle_tags_dock = true,
             ModeIconKind::Split => action.toggle_active_tab_split = true,
             ModeIconKind::VerticalTabs => action.toggle_vertical_tabs = true,
         }
     }
 
-    /// The separator is drawn right before the file explorer icon.
+    /// The separator is drawn right before the tags panel icon.
     fn separator_before(self) -> bool {
-        self.kind == ModeIconKind::FileExplorer
+        self.kind == ModeIconKind::Tags
     }
 }
 
@@ -61,12 +60,17 @@ impl ModeIcon {
 /// from the end of this list.
 fn mode_icons(
     is_dark: bool,
-    is_file_explorer: bool,
+    tags_dock_open: bool,
     sidebar_collapsed: bool,
     has_split: bool,
     vertical_tabs: bool,
 ) -> Vec<ModeIcon> {
-    let mut icons = vec![
+    let (split_glyph, split_tooltip_key) = if has_split {
+        (regular::ARROWS_IN_LINE_HORIZONTAL, "tooltip_close_split")
+    } else {
+        (regular::SPLIT_HORIZONTAL, "tooltip_open_split")
+    };
+    vec![
         ModeIcon {
             kind: ModeIconKind::Sidebar,
             glyph: regular::SIDEBAR_SIMPLE,
@@ -84,32 +88,22 @@ fn mode_icons(
             active: None,
         },
         ModeIcon {
-            kind: ModeIconKind::FileExplorer,
-            glyph: regular::TABS,
-            tooltip_key: "tooltip_show_file_explorer",
-            active: Some(is_file_explorer),
-        },
-        ModeIcon {
             kind: ModeIconKind::Tags,
             glyph: regular::TAG,
-            tooltip_key: "tooltip_show_tags",
-            active: Some(!is_file_explorer),
+            tooltip_key: if tags_dock_open {
+                "tooltip_hide_tags_panel"
+            } else {
+                "tooltip_show_tags_panel"
+            },
+            active: Some(tags_dock_open),
         },
-    ];
-
-    if is_file_explorer {
-        let (glyph, tooltip_key) = if has_split {
-            (regular::ARROWS_IN_LINE_HORIZONTAL, "tooltip_close_split")
-        } else {
-            (regular::SPLIT_HORIZONTAL, "tooltip_open_split")
-        };
-        icons.push(ModeIcon {
+        ModeIcon {
             kind: ModeIconKind::Split,
-            glyph,
-            tooltip_key,
+            glyph: split_glyph,
+            tooltip_key: split_tooltip_key,
             active: None,
-        });
-        icons.push(ModeIcon {
+        },
+        ModeIcon {
             kind: ModeIconKind::VerticalTabs,
             glyph: regular::ROWS,
             tooltip_key: if vertical_tabs {
@@ -118,10 +112,8 @@ fn mode_icons(
                 "tooltip_vertical_tabs_on"
             },
             active: Some(vertical_tabs),
-        });
-    }
-
-    icons
+        },
+    ]
 }
 
 /// Width of an icon button as allocated by `clickable_icon` / `clickable_active_icon`.
@@ -168,7 +160,7 @@ pub fn draw_topbar(
     ui: &mut egui::Ui,
     i18n: &I18n,
     is_dark: bool,
-    is_file_explorer: bool,
+    tags_dock_open: bool,
     sidebar_collapsed: bool,
     hwnd: Option<HWND>,
     palette: &crate::gui::theme::ThemePalette,
@@ -178,7 +170,7 @@ pub fn draw_topbar(
     let mut action = TopbarAction::default();
     let icons = mode_icons(
         is_dark,
-        is_file_explorer,
+        tags_dock_open,
         sidebar_collapsed,
         has_split,
         vertical_tabs,

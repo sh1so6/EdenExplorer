@@ -58,6 +58,10 @@ pub enum ItemViewerAction {
     ColumnSizesChanged {
         finished: bool,
     },
+    /// Double-click on empty item viewer space: go to the parent folder.
+    /// Converted to the view's `ItemViewerNavAction::Up` in `draw_tab_content`,
+    /// so it is routed to the pane it came from.
+    NavigateUp,
 }
 
 #[derive(Clone, Debug)]

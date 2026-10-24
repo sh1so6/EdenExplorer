@@ -78,6 +78,9 @@ pub fn draw_item_viewer(
     let layout = compute_layout(ui, is_drive_view, is_recycle_bin_view, palette);
     let modal_input_blocked =
         tags_state.picker.is_some() || theme_customizer_window.open || settings_window.open;
+    // The docked tags panel has keyboard focus: no explorer keyboard handling
+    // (Delete, F2, Ctrl+A/C/X/V, type-to-filter, arrow selection, ...).
+    let keyboard_captured = tags_state.keyboard_captured;
 
     let mut action: Option<ItemViewerAction> = None;
 
@@ -117,7 +120,7 @@ pub fn draw_item_viewer(
         explorer_state.selection_focus = None;
     }
 
-    if !modal_input_blocked && is_focused {
+    if !modal_input_blocked && is_focused && !keyboard_captured {
         if let Some(global_action) = handle_global_actions(
             ui,
             files,
@@ -182,7 +185,7 @@ pub fn draw_item_viewer(
             settings_window,
             hwnd,
             modal_input_blocked,
-            is_focused,
+            is_focused && !keyboard_captured,
             active_tab_id,
             current_dir,
         )
@@ -198,7 +201,6 @@ pub fn draw_item_viewer(
             is_drive_view,
             is_recycle_bin_view,
             &current_dir,
-            drag_state,
             modal_input_blocked,
             is_loading && files.is_empty(),
         )
@@ -604,7 +606,9 @@ pub fn draw_item_viewer(
                     // ------------------- END OF ROW HANDLING -------------------
 
                     if let Some((_, is_dir, path, rect)) = best_hovered_row.take() {
-                        if is_dir {
+                        // A dragged folder is no drop target for itself: no
+                        // highlight that suggests a (no-op) move.
+                        if is_dir && !drag_state.source_items.contains(&path) {
                             current_hovered_drop_target = Some(path);
                             current_hovered_drop_target_rect = Some(rect);
                         }
@@ -719,7 +723,7 @@ pub fn draw_item_viewer(
             *hovered_drop_target_out = hovered_drop_target.clone();
             *hovered_drop_target_rect_out = hovered_drop_target_rect;
 
-            if !modal_input_blocked {
+            if !modal_input_blocked && !keyboard_captured {
                 if let Some(a) = handle_keyboard_navigation(
                     ui.ctx(),
                     &filter_state.cached_indices,
@@ -734,22 +738,29 @@ pub fn draw_item_viewer(
             // --- Drag and Drop Detection ---
             *external_drag_to_internal_hover = native_drag_active || external_file_hover;
             // Fill remaining space so empty area is interactable
-            if drag_state.active && pointer_released {
-                let target_dir = current_hovered_drop_target
-                    .clone()
-                    .or_else(|| bg_response.hovered().then(|| current_dir.clone()));
-
-                if let Some(target_dir) = target_dir {
-                    action = Some(ItemViewerAction::MoveItems {
-                        sources: drag_state.source_items.clone(),
-                        target_dir,
-                    });
-                }
+            // Internal drags only move onto a folder row; releasing them over
+            // empty space does nothing (the drag state is cleared by the
+            // main window's release handling).
+            if drag_state.active
+                && pointer_released
+                && let Some(target_dir) = current_hovered_drop_target.clone()
+            {
+                action = Some(ItemViewerAction::MoveItems {
+                    sources: drag_state.source_items.clone(),
+                    target_dir,
+                });
             }
 
             if !modal_input_blocked {
                 if bg_response.clicked() {
                     action = Some(ItemViewerAction::DeselectAll);
+                }
+                // Double-click on empty space goes up one level (unless the
+                // double-click was a column divider auto-fit).
+                if bg_response.double_clicked()
+                    && !matches!(action, Some(ItemViewerAction::FitColumn(_)))
+                {
+                    action = Some(ItemViewerAction::NavigateUp);
                 }
 
                 if !layout.is_drive_view && !is_recycle_bin_view {

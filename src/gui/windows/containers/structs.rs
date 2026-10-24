@@ -917,6 +917,11 @@ pub struct SidebarAction {
     pub move_files_to_sidebar_dir: Option<PathBuf>,
     /// A section was collapsed or expanded; persist `sidebar.json`.
     pub sections_changed: bool,
+    /// A tag row was clicked: open the tags dock and focus this tag.
+    pub open_tag: Option<u64>,
+    /// Dragged items were dropped on this tag row: add them to the tag
+    /// (never a file move/copy).
+    pub add_to_tag: Option<u64>,
 }
 
 #[derive(Default)]
@@ -926,7 +931,7 @@ pub struct TopbarAction {
     pub open_settings: bool,
     pub about: bool,
     pub exit: bool,
-    pub toggle_file_explorer: bool,
+    pub toggle_tags_dock: bool,
     pub toggle_sidebar: bool,
     pub toggle_active_tab_split: bool,
     pub toggle_vertical_tabs: bool,
@@ -1046,6 +1051,22 @@ pub struct TagsState {
     pub drag_state: Option<TagDragState>,
     pub delete_confirmation: Option<u64>,
     pub pending_action: Option<ItemViewerAction>,
+    /// Tag to bring into view in the dock on the next frame (opens its group
+    /// and scrolls to it). Consumed by `draw_tags`.
+    pub pending_focus: Option<u64>,
+    /// Tag last focused from the sidebar; its sidebar row is highlighted while
+    /// the dock is open.
+    pub focused_group: Option<u64>,
+    /// Tag to flash briefly (dock group outline / sidebar row), and since when.
+    pub highlight: Option<(u64, std::time::Instant)>,
+    /// `is_dir` per tagged path, so drawing the dock does not stat the file
+    /// system every frame. Cleared when tagged paths change; may be stale after
+    /// external file system changes (only affects the row icon / open action).
+    pub is_dir_cache: HashMap<PathBuf, bool>,
+    /// The dock has keyboard focus (or a tag is being renamed): explorer
+    /// keyboard shortcuts must not act on the explorer selection. Updated by
+    /// the main window at the start of each frame.
+    pub keyboard_captured: bool,
 }
 
 impl Default for TagsState {
@@ -1058,6 +1079,11 @@ impl Default for TagsState {
             drag_state: None,
             delete_confirmation: None,
             pending_action: None,
+            pending_focus: None,
+            focused_group: None,
+            highlight: None,
+            is_dir_cache: HashMap::new(),
+            keyboard_captured: false,
         }
     }
 }
@@ -1095,11 +1121,7 @@ impl TagsState {
                 })
                 .collect(),
             next_group_id: snapshot.next_group_id.max(1),
-            picker: None,
-            rename_state: None,
-            drag_state: None,
-            delete_confirmation: None,
-            pending_action: None,
+            ..Self::default()
         }
     }
 
@@ -1175,6 +1197,7 @@ impl TagsState {
 
         if changed {
             self.prune_empty_groups();
+            self.is_dir_cache.clear();
         }
 
         changed
@@ -1208,6 +1231,9 @@ impl TagsState {
             }
         }
 
+        if changed {
+            self.is_dir_cache.clear();
+        }
         changed
     }
 
@@ -1266,6 +1292,9 @@ impl TagsState {
             }
         }
 
+        if changed {
+            self.is_dir_cache.clear();
+        }
         changed
     }
 
@@ -1282,6 +1311,7 @@ impl TagsState {
 
         if changed {
             self.prune_empty_groups();
+            self.is_dir_cache.clear();
         }
 
         changed

@@ -3,6 +3,7 @@ pub mod colors;
 pub mod dialogs;
 pub mod files;
 pub mod fonts;
+pub mod shortcut;
 pub mod sorting;
 pub mod tabs;
 pub mod text;

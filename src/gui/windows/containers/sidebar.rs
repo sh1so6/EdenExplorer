@@ -6,8 +6,10 @@ use crate::core::utils::text::apply_eden_text_overrides;
 use crate::gui::i18n::I18n;
 use crate::gui::icons::IconCache;
 use crate::gui::theme::ThemePalette;
+use crate::gui::utils::files::format_size;
 use crate::gui::utils::{draw_object_drag_ghost, drive_usage_color, truncate_item_text};
-use crate::gui::windows::containers::structs::SidebarAction;
+use crate::gui::windows::containers::structs::{SidebarAction, TagGroup};
+use crate::gui::windows::containers::tags::TAG_FOCUS_HIGHLIGHT;
 use crate::gui::windows::structs::{SidebarSection, SidebarState};
 use eframe::egui;
 use egui::containers::{Popup, PopupCloseBehavior};
@@ -23,12 +25,25 @@ pub const SIDEBAR_MIN_WIDTH: f32 = 140.0;
 pub const SIDEBAR_MAX_WIDTH: f32 = 4000.0;
 pub const SIDEBAR_DEFAULT_WIDTH: f32 = 250.0;
 
+/// Read-only view of the tags shown in the sidebar's Tags section.
+pub struct SidebarTags<'a> {
+    pub groups: &'a [TagGroup],
+    /// The tags dock is open (the focused tag's row is highlighted).
+    pub dock_open: bool,
+    /// Tag last focused from the sidebar.
+    pub focused: Option<u64>,
+    /// Tag to flash briefly (e.g. after items were dropped on it).
+    pub highlight: Option<(u64, Instant)>,
+}
+
 /// Draw the sidebar, supporting favorites reordering
+#[allow(clippy::too_many_arguments)]
 pub fn draw_sidebar(
     ui: &mut egui::Ui,
     i18n: &I18n,
     icon_cache: &IconCache,
     sidebar_state: &mut SidebarState,
+    tags: &SidebarTags,
     palette: &ThemePalette,
     drag_active: bool,
     drag_hover_target: Option<PathBuf>,
@@ -351,6 +366,34 @@ pub fn draw_sidebar(
                     }
 
                     ui.add_space(6.0 - SECTION_HEADER_PAD_Y);
+                    if section_header(
+                        ui,
+                        i18n,
+                        sidebar_state,
+                        SidebarSection::Tags,
+                        palette,
+                        true,
+                        drag_active,
+                        pointer_pos,
+                        &mut action,
+                    ) {
+                        ui.add_space(4.0 - SECTION_HEADER_PAD_Y);
+                        // Internal (egui pointer) drags only: a native OLE drag
+                        // hovering the window cannot be dropped on a tag.
+                        let internal_drag = drag_active && drag_hover_target.is_none();
+                        draw_sidebar_tags(
+                            ui,
+                            i18n,
+                            palette,
+                            tags,
+                            internal_drag,
+                            pointer_pos,
+                            pointer_released,
+                            &mut action,
+                        );
+                    }
+
+                    ui.add_space(6.0 - SECTION_HEADER_PAD_Y);
                     // While collapsed the drive list is neither drawn nor refreshed
                     // (no `get_drive_infos` calls); expanding refreshes it if stale.
                     if section_header(
@@ -432,6 +475,195 @@ pub fn draw_sidebar(
 
     action.move_files_to_sidebar_dir = tab_drop_target;
     action
+}
+
+/// Rows of the Tags section: color dot + name + object count. Click opens
+/// the tags dock focused on that tag; dropping dragged items adds them to it.
+#[allow(clippy::too_many_arguments)]
+fn draw_sidebar_tags(
+    ui: &mut egui::Ui,
+    i18n: &I18n,
+    palette: &ThemePalette,
+    tags: &SidebarTags,
+    internal_drag: bool,
+    pointer_pos: Option<egui::Pos2>,
+    pointer_released: bool,
+    action: &mut SidebarAction,
+) {
+    if tags.groups.is_empty() {
+        ui.horizontal(|ui| {
+            ui.add_space(4.0);
+            ui.add(
+                egui::Label::new(
+                    egui::RichText::new(i18n.tr("tag_empty_state"))
+                        .size(palette.text_size)
+                        .color(ui.visuals().weak_text_color()),
+                )
+                .wrap(),
+            );
+        });
+        return;
+    }
+
+    let highlight = tags
+        .highlight
+        .filter(|(_, since)| since.elapsed() < TAG_FOCUS_HIGHLIGHT);
+    let hint = i18n.tr("tag_sidebar_hint");
+    for group in tags.groups {
+        let selected = tags.dock_open && tags.focused == Some(group.id);
+        let flash = highlight
+            .filter(|(id, _)| *id == group.id)
+            .map(|(_, since)| {
+                1.0 - since.elapsed().as_secs_f32() / TAG_FOCUS_HIGHLIGHT.as_secs_f32()
+            });
+        let (resp, drop_hover) = sidebar_tag_item(
+            ui,
+            palette,
+            group,
+            selected,
+            flash,
+            internal_drag,
+            pointer_pos,
+            &hint,
+        );
+        if drop_hover && pointer_released {
+            action.add_to_tag = Some(group.id);
+        }
+        if resp.clicked() {
+            action.open_tag = Some(group.id);
+        }
+        Popup::context_menu(&resp)
+            .close_behavior(PopupCloseBehavior::CloseOnClickOutside)
+            .show(|ui| {
+                apply_eden_text_overrides(ui, palette);
+                if ui.button(i18n.tr("tag_show_in_panel")).clicked() {
+                    action.open_tag = Some(group.id);
+                    ui.close();
+                }
+            });
+    }
+}
+
+/// One tag row. Returns the response and whether an internal item drag is
+/// hovering the row (a release there drops onto the tag).
+#[allow(clippy::too_many_arguments)]
+fn sidebar_tag_item(
+    ui: &mut egui::Ui,
+    palette: &ThemePalette,
+    group: &TagGroup,
+    selected: bool,
+    flash: Option<f32>,
+    internal_drag: bool,
+    pointer_pos: Option<egui::Pos2>,
+    hint: &str,
+) -> (egui::Response, bool) {
+    let height = if palette.sidebar_item_spacing_y > 1.0 {
+        18.0 * palette.sidebar_item_spacing_y
+    } else {
+        18.0
+    };
+    let (rect, resp) = ui.allocate_exact_size(
+        egui::vec2(ui.available_width(), height),
+        egui::Sense::click(),
+    );
+    // egui does not report hover while another widget owns the drag, so test
+    // the pointer position directly (like the favorites drop targets).
+    let drop_hover = internal_drag && pointer_pos.is_some_and(|pos| rect.contains(pos));
+
+    let radius = egui::CornerRadius::same(palette.medium_radius);
+    let fill = if selected || resp.is_pointer_button_down_on() {
+        palette.primary_active
+    } else if resp.hovered() || drop_hover {
+        palette.primary_hover
+    } else {
+        egui::Color32::TRANSPARENT
+    };
+    let painter = ui.painter();
+    if fill != egui::Color32::TRANSPARENT {
+        painter.rect_filled(rect, radius, fill);
+    }
+    if let Some(alpha) = flash {
+        painter.rect_stroke(
+            rect,
+            radius,
+            egui::Stroke::new(
+                1.5,
+                palette.primary_active.gamma_multiply(alpha.clamp(0.0, 1.0)),
+            ),
+            egui::StrokeKind::Inside,
+        );
+        ui.ctx().request_repaint();
+    }
+    if drop_hover {
+        painter.rect_stroke(
+            rect,
+            radius,
+            egui::Stroke::new(1.5, palette.primary_active),
+            egui::StrokeKind::Inside,
+        );
+    }
+
+    // Color dot centered in the icon column of the other sidebar rows.
+    let icon_size = palette.sidebar_icon_size;
+    let dot_center = egui::pos2(rect.min.x + 4.0 + icon_size * 0.5, rect.center().y);
+    let [r, g, b, _] = group.color.to_array();
+    let dot_outline = egui::Color32::from_rgb(
+        (r as f32 * 0.6) as u8,
+        (g as f32 * 0.6) as u8,
+        (b as f32 * 0.6) as u8,
+    );
+    painter.circle(
+        dot_center,
+        (icon_size * 0.28).clamp(3.0, 6.0),
+        egui::Color32::from_rgb(r, g, b),
+        egui::Stroke::new(1.0, dot_outline),
+    );
+
+    // Count, right aligned and dimmed.
+    let font_id = FontId::new(palette.text_size, FontFamily::Proportional);
+    let count_galley = painter.layout_no_wrap(
+        group.items.len().to_string(),
+        font_id.clone(),
+        ui.visuals().weak_text_color(),
+    );
+    let count_width = count_galley.size().x;
+    let count_pos = egui::pos2(
+        rect.right() - 6.0 - count_width,
+        rect.center().y - count_galley.size().y * 0.5,
+    );
+    painter.galley(count_pos, count_galley, ui.visuals().weak_text_color());
+
+    // Name, truncated before the count.
+    let text_offset_x = palette.text_size + icon_size + 4.0;
+    let text_width = (rect.width() - text_offset_x - count_width - 12.0).max(0.0);
+    let color = ui.visuals().text_color();
+    let (display_name, truncated) =
+        truncate_item_text(ui, &group.name, text_width, &font_id, color);
+    ui.painter().text(
+        egui::pos2(rect.min.x + text_offset_x, rect.center().y - 2.0),
+        egui::Align2::LEFT_CENTER,
+        display_name,
+        font_id,
+        color,
+    );
+
+    resp.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, true, &group.name));
+    let resp = resp.on_hover_cursor(egui::CursorIcon::PointingHand);
+    let resp = if internal_drag {
+        resp
+    } else {
+        let tooltip = if truncated {
+            format!("{}\n{}", group.name, hint)
+        } else {
+            hint.to_string()
+        };
+        resp.on_hover_text(
+            egui::RichText::new(tooltip)
+                .size(palette.tooltip_text_size)
+                .color(palette.tooltip_text_color),
+        )
+    };
+    (resp, drop_hover)
 }
 
 /// Extra vertical padding of a section header row above and below its text.
@@ -722,7 +954,13 @@ fn favorites_item_layout(
     )
 }
 
-/// Draw a drive item with usage bar and size on hover
+/// Height of the thin usage bar under a drive row's label.
+const DRIVE_BAR_HEIGHT: f32 = 3.0;
+/// Gap between the label line and the usage bar.
+const DRIVE_BAR_GAP: f32 = 1.0;
+
+/// Draw a compact single-line drive item: icon + label with a thin usage bar
+/// under the label; used/total size in the tooltip.
 fn sidebar_drive_item(
     ui: &mut egui::Ui,
     icon_cache: &IconCache,
@@ -731,11 +969,13 @@ fn sidebar_drive_item(
     selected: bool,
 ) -> egui::Response {
     let available_width = ui.available_width();
-    let height = if palette.sidebar_item_spacing_y > 1.0 {
-        32.0 * palette.sidebar_item_spacing_y
+    // Same line height as the other sidebar items, plus room for the bar.
+    let line_height = if palette.sidebar_item_spacing_y > 1.0 {
+        18.0 * palette.sidebar_item_spacing_y
     } else {
-        32.0
+        18.0
     };
+    let height = line_height + DRIVE_BAR_GAP + DRIVE_BAR_HEIGHT + 1.0;
 
     let (rect, mut resp) =
         ui.allocate_exact_size(egui::vec2(available_width, height), egui::Sense::click());
@@ -767,8 +1007,10 @@ fn sidebar_drive_item(
     let icon_size = egui::vec2(palette.sidebar_icon_size, palette.sidebar_icon_size);
     let icon_padding = 4.0;
 
+    // Icon and label are centered on the label line (the row minus the bar).
+    let line_center_y = rect.min.y + line_height / 2.0;
     let text_offset_x = if let Some(icon) = icon_cache.get(&drive.path, true) {
-        let icon_pos = egui::pos2(rect.min.x + 4.0, rect.min.y + 4.0);
+        let icon_pos = egui::pos2(rect.min.x + 4.0, line_center_y - icon_size.y / 2.0);
 
         ui.painter().image(
             (&icon).into(),
@@ -782,78 +1024,73 @@ fn sidebar_drive_item(
         palette.text_size + 20.0 + icon_padding
     };
 
-    // --- DISPLAY TEXT ---
-    let text_width = available_width - text_offset_x;
-    let max_chars = (text_width / 7.0) as usize;
-
-    let display_name = if drive.display.len() > max_chars && max_chars > 3 {
-        // Use character boundaries instead of byte indices
-        let mut char_count = 0;
-        let mut byte_end = 0;
-        for (i, _) in drive.display.char_indices() {
-            if char_count >= max_chars - 3 {
-                break;
-            }
-            char_count += 1;
-            byte_end = i;
-        }
-        format!("{}...", &drive.display[..byte_end])
-    } else {
-        drive.display.clone()
-    };
-
-    let text_y = rect.min.y + 4.0 + icon_size.y / 2.0;
-    let text_pos = egui::pos2(rect.min.x + text_offset_x, text_y);
+    // --- Label ---
     let font_id = FontId::new(palette.text_size, FontFamily::Proportional);
+    let color = ui.visuals().text_color();
+    let text_width = (available_width - text_offset_x - 4.0).max(0.0);
+    let (display_name, truncated) =
+        truncate_item_text(ui, &drive.display, text_width, &font_id, color);
 
     ui.painter().text(
-        text_pos,
+        // Same baseline nudge as `draw_sidebar_item`.
+        egui::pos2(rect.min.x + text_offset_x, line_center_y - 2.0),
         egui::Align2::LEFT_CENTER,
         display_name,
         font_id,
-        ui.visuals().text_color(),
+        color,
     );
 
-    // --- Bottom row: progress bar ---
-    if let (Some(total), Some(free)) = (drive.total_space, drive.free_space) {
-        let bar_height = 6.0;
-        let max_bar_width = 180.0;
-        let bar_width = (available_width - 8.0).min(max_bar_width);
-
-        let bar_rect = egui::Rect::from_min_size(
-            egui::pos2(rect.min.x + 4.0, rect.bottom() - bar_height),
-            egui::vec2(bar_width, bar_height),
+    // --- Thin usage bar under the label ---
+    let usage = match (drive.total_space, drive.free_space) {
+        (Some(total), Some(free)) if total > 0 => Some((total, total.saturating_sub(free))),
+        _ => None,
+    };
+    if let Some((total, used)) = usage {
+        let used_ratio = (used as f64 / total as f64).clamp(0.0, 1.0) as f32;
+        let bar_left = rect.min.x + text_offset_x;
+        let bar_right = (rect.right() - 8.0).max(bar_left);
+        let bar_top = rect.min.y + line_height + DRIVE_BAR_GAP;
+        let bar_rect = egui::Rect::from_min_max(
+            egui::pos2(bar_left, bar_top),
+            egui::pos2(bar_right, bar_top + DRIVE_BAR_HEIGHT),
         );
+        let radius = egui::CornerRadius::same((DRIVE_BAR_HEIGHT / 2.0) as u8);
 
-        let bar_bg = palette.drive_usage_background;
-        let bar_fill = drive_usage_color((total - free) as f32 / total as f32, palette);
-
-        ui.painter().rect_filled(
-            bar_rect,
-            egui::CornerRadius::same(palette.small_radius),
-            bar_bg,
+        ui.painter()
+            .rect_filled(bar_rect, radius, palette.drive_usage_background);
+        let fill_rect = egui::Rect::from_min_size(
+            bar_rect.min,
+            egui::vec2(bar_rect.width() * used_ratio, DRIVE_BAR_HEIGHT),
         );
+        ui.painter()
+            .rect_filled(fill_rect, radius, drive_usage_color(used_ratio, palette));
+    }
 
-        let used_ratio = (total - free) as f32 / total as f32;
-        let fill_width = bar_rect.width() * used_ratio;
-
-        let fill_rect = egui::Rect::from_min_size(bar_rect.min, egui::vec2(fill_width, bar_height));
-
-        ui.painter().rect_filled(
-            fill_rect,
-            egui::CornerRadius::same(palette.small_radius),
-            bar_fill,
-        );
-
-        let gb = 1024.0 * 1024.0 * 1024.0;
-        let used_gb = (total - free) as f64 / gb;
-        let total_gb = total as f64 / gb;
-
-        resp = resp.on_hover_text(
-            egui::RichText::new(format!("{:.1}/{:.1}GB", used_gb, total_gb))
-                .size(palette.tooltip_text_size)
-                .color(palette.tooltip_text_color),
-        );
+    // --- Tooltip: full name (if truncated) + used/total ---
+    // Same "free / total" wording as the drive list in the item viewer, plus
+    // the used percentage the bar shows. Built only while the tooltip is shown.
+    if truncated || usage.is_some() {
+        resp = resp.on_hover_ui(|ui| {
+            let size_text = usage.map(|(total, used)| {
+                format!(
+                    "{} / {} ({:.0}%)",
+                    format_size(total - used),
+                    format_size(total),
+                    used as f64 / total as f64 * 100.0
+                )
+            });
+            let tooltip = match (truncated, size_text) {
+                (true, Some(size)) => format!("{}\n{}", drive.display, size),
+                (true, None) => drive.display.clone(),
+                (false, Some(size)) => size,
+                (false, None) => String::new(),
+            };
+            ui.label(
+                egui::RichText::new(tooltip)
+                    .size(palette.tooltip_text_size)
+                    .color(palette.tooltip_text_color),
+            );
+        });
     }
 
     resp

@@ -1,0 +1,55 @@
+# Tags sidebar section + docked tags panel (open/focus/resize/close, split,
+# vertical tabs) and the compact Storage rows.
+#   ./scripts/ui-probe.ps1 -Script scripts/probe/tags_dock_layout.txt -Seed scripts/probe/seed_tags
+size 1117 717
+wait_ms 1500
+shot out/tags_0_default.png
+# Hover a tag row: tooltip with the click/drop hint.
+move 80 316
+wait_ms 700
+shot out/tags_1_hover_tag.png
+# Hover a drive row (compact Storage): usage tooltip.
+move 100 417
+wait_ms 700
+shot out/tags_1b_hover_drive.png
+# Click "Work": dock opens focused on it.
+click 80 294
+move 700 300
+wait_ms 100
+shot out/tags_2_dock_work.png
+# Click "System": scrolls to it, brief outline on its header.
+click 80 338
+move 700 300
+shot out/tags_3_dock_system_highlight.png
+wait_ms 1200
+shot out/tags_4_dock_system_settled.png
+# Separator hover, then drag it up by 150.
+move 700 474
+wait_ms 100
+shot out/tags_5_separator_hover.png
+drag 700 474 700 324 10
+move 700 200
+shot out/tags_6_dock_resized.png
+# Split view + dock.
+click 130 18
+move 700 200
+wait_ms 500
+shot out/tags_7_split_dock.png
+# Vertical tabs + split + dock.
+click 154 18
+move 700 200
+wait_ms 500
+shot out/tags_8_vertical_split_dock.png
+# Close split, keep vertical tabs.
+click 130 18
+move 700 200
+wait_ms 300
+shot out/tags_9_vertical_dock.png
+# Close the dock with the topbar icon, reopen, then close with X.
+click 107 18
+move 700 200
+shot out/tags_10_closed_topbar.png
+click 107 18
+move 700 200
+shot out/tags_11_reopened.png
+quit

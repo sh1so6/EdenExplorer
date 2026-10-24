@@ -30,10 +30,13 @@ fn main() -> eframe::Result<()> {
         }
     };
 
+    // Single instance: a second launch hands its paths (possibly none) to the
+    // running window, which opens them as tabs and comes to the front. A launch
+    // without paths only activates it. `--new-window` opts out.
     // The UI probe must run side by side with a normal instance: never take the
     // single-instance mutex nor forward paths.
     let _instance_guard =
-        if launch_options.new_window || launch_paths.is_empty() || crate::core::probe_active() {
+        if launch_options.new_window || crate::core::probe_active() {
             None
         } else {
             match acquire_or_forward(&launch_paths) {
