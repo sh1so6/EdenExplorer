@@ -566,6 +566,7 @@ pub fn draw_item_viewer(
                                 drag_state,
                                 explorer_state,
                                 is_recycle_bin_view,
+                                row_resp.double_clicked(),
                             ) {
                                 action = Some(a);
                             }

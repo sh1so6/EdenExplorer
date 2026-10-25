@@ -1915,6 +1915,7 @@ pub fn handle_row_click(
     drag_state: &DragState,
     explorer_state: &mut ExplorerState,
     is_recycle_bin_view: bool,
+    double_clicked: bool,
 ) -> Option<ItemViewerAction> {
     if drag_state.active {
         return None;
@@ -1958,24 +1959,20 @@ pub fn handle_row_click(
 
         Some(ItemViewerAction::Select(file.path.clone()))
     } else {
-        let is_single_selected = explorer_state.selected_paths.len() == 1
-            && explorer_state.selected_paths.contains(&file.path);
+        // A single click selects; a double-click opens. The first click of a
+        // double-click has already selected the item.
+        explorer_state.selection_anchor = Some(row_idx);
+        explorer_state.selection_focus = Some(row_idx);
 
-        if is_single_selected {
-            if is_recycle_bin_view {
-                return Some(ItemViewerAction::ReplaceSelection(file.path.clone()));
-            }
+        if double_clicked && !is_recycle_bin_view {
             return Some(if file.is_dir {
                 ItemViewerAction::Open(file.path.clone())
             } else {
                 ItemViewerAction::OpenWithDefault(vec![file.path.clone()])
             });
-        } else {
-            explorer_state.selection_anchor = Some(row_idx);
-            explorer_state.selection_focus = Some(row_idx);
-
-            Some(ItemViewerAction::ReplaceSelection(file.path.clone()))
         }
+
+        Some(ItemViewerAction::ReplaceSelection(file.path.clone()))
     }
 }
 

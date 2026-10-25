@@ -264,6 +264,7 @@ pub fn draw_gallery_view(
                                 drag_state,
                                 explorer_state,
                                 false,
+                                response.double_clicked(),
                             ) {
                                 action = Some(a);
                             }
