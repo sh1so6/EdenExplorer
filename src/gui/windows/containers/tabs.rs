@@ -21,7 +21,13 @@ const TAB_NAV_BUTTON_WIDTH: f32 = 28.0;
 pub const VERTICAL_TABS_MIN_WIDTH: f32 = 120.0;
 pub const VERTICAL_TABS_MAX_WIDTH: f32 = 400.0;
 pub const VERTICAL_TABS_DEFAULT_WIDTH: f32 = 200.0;
-const VERTICAL_TAB_ROW_HEIGHT: f32 = 30.0;
+/// Row height of the vertical tab rail (Settings > General), stored in `layout.json`.
+pub const VERTICAL_TAB_ROW_HEIGHT_MIN: f32 = 20.0;
+pub const VERTICAL_TAB_ROW_HEIGHT_MAX: f32 = 40.0;
+pub const VERTICAL_TAB_ROW_HEIGHT_DEFAULT: f32 = 24.0;
+/// Space kept around the taller of the title text and the tab icon, so a theme with a
+/// larger text size raises the effective minimum row height instead of clipping text.
+const VERTICAL_TAB_ROW_MIN_VERTICAL_MARGIN: f32 = 8.0;
 const VERTICAL_TABS_HEADER_HEIGHT: f32 = 20.0;
 /// Gap between the rail's top/bottom edges and its rows/button; inactive rows and the
 /// button also keep it clear of the right divider.
@@ -301,6 +307,22 @@ pub fn draw_tabs(
 
 /// Background of the vertical tab rail: the app background nudged slightly towards the text
 /// color, so the rail reads as its own layer next to the sidebar and content in both themes.
+/// The row height actually drawn: the user's setting within its bounds, but never less
+/// than the title text / tab icon plus a small margin.
+fn vertical_tab_row_height(setting: f32, palette: &ThemePalette) -> f32 {
+    let setting = if setting.is_finite() {
+        setting
+    } else {
+        VERTICAL_TAB_ROW_HEIGHT_DEFAULT
+    };
+    let content_min =
+        palette.text_size.max(palette.tab_icon_size) + VERTICAL_TAB_ROW_MIN_VERTICAL_MARGIN;
+    setting
+        .clamp(VERTICAL_TAB_ROW_HEIGHT_MIN, VERTICAL_TAB_ROW_HEIGHT_MAX)
+        .max(content_min)
+        .round()
+}
+
 fn vertical_tabs_rail_fill(palette: &ThemePalette) -> egui::Color32 {
     lerp_opaque(
         palette.application_bg_color,
@@ -358,9 +380,11 @@ pub fn draw_vertical_tabs(
     drag_active: bool,
     drag_hover_target: Option<PathBuf>,
     draw_left_border: bool,
+    row_height: f32,
 ) -> TabsAction {
     let mut action = TabsAction::default();
     let drop_ctx = TabDropContext::new(ui, drag_active, drag_hover_target.as_ref());
+    let row_height = vertical_tab_row_height(row_height, palette);
     let mut tab_drop_target: Option<PathBuf> = None;
 
     let panel_rect = ui.max_rect();
@@ -409,7 +433,7 @@ pub fn draw_vertical_tabs(
                     ui.spacing_mut().item_spacing.y = 2.0;
                     for (index, tab) in tabs.iter().enumerate() {
                         let (rect, resp) = ui.allocate_exact_size(
-                            egui::vec2(ui.available_width(), VERTICAL_TAB_ROW_HEIGHT),
+                            egui::vec2(ui.available_width(), row_height),
                             egui::Sense::click(),
                         );
 
@@ -616,9 +640,12 @@ fn handle_draw_vertical_tab_row(
             vertical_tabs_border_stroke(palette),
             egui::StrokeKind::Inside,
         );
+        // Scales with the row height (5 px at 20, 6 px at the 24 px default, 10 px at 40)
+        // so the bar keeps its proportions on compact rows.
+        let accent_inset = (rect.height() * 0.25).round().max(4.0);
         let accent_rect = egui::Rect::from_min_max(
-            egui::pos2(rect.left() + 2.0, rect.top() + 7.0),
-            egui::pos2(rect.left() + 5.0, rect.bottom() - 7.0),
+            egui::pos2(rect.left() + 2.0, rect.top() + accent_inset),
+            egui::pos2(rect.left() + 5.0, rect.bottom() - accent_inset),
         );
         painter.rect_filled(
             accent_rect,
@@ -1192,4 +1219,41 @@ fn tab_nav_button(
     }
 
     resp
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::gui::theme::{ThemeMode, get_default_palette};
+
+    #[test]
+    fn vertical_tab_row_height_is_bounded_and_fits_the_text() {
+        let palette = get_default_palette(ThemeMode::Dark);
+        assert_eq!(
+            vertical_tab_row_height(VERTICAL_TAB_ROW_HEIGHT_DEFAULT, &palette),
+            VERTICAL_TAB_ROW_HEIGHT_DEFAULT
+        );
+        assert_eq!(
+            vertical_tab_row_height(1.0, &palette),
+            VERTICAL_TAB_ROW_HEIGHT_MIN
+        );
+        assert_eq!(
+            vertical_tab_row_height(500.0, &palette),
+            VERTICAL_TAB_ROW_HEIGHT_MAX
+        );
+        assert_eq!(
+            vertical_tab_row_height(f32::NAN, &palette),
+            VERTICAL_TAB_ROW_HEIGHT_DEFAULT
+        );
+        // Whole pixels, so row edges stay crisp.
+        assert_eq!(vertical_tab_row_height(26.4, &palette), 26.0);
+
+        // A larger theme text size raises the effective minimum instead of clipping.
+        let mut large_text = palette.clone();
+        large_text.text_size = 20.0;
+        assert_eq!(
+            vertical_tab_row_height(VERTICAL_TAB_ROW_HEIGHT_MIN, &large_text),
+            20.0 + VERTICAL_TAB_ROW_MIN_VERTICAL_MARGIN
+        );
+    }
 }

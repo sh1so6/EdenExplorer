@@ -14,6 +14,9 @@ use crate::gui::i18n::I18n;
 use crate::gui::theme::ThemePalette;
 use crate::gui::utils::SortColumn;
 use crate::gui::windows::containers::enums::ItemViewerHeaderColumn;
+use crate::gui::windows::containers::tabs::{
+    VERTICAL_TAB_ROW_HEIGHT_DEFAULT, VERTICAL_TAB_ROW_HEIGHT_MAX, VERTICAL_TAB_ROW_HEIGHT_MIN,
+};
 use crate::gui::windows::eden_menu_entries::EdenMenuEntry;
 use crate::gui::windows::enums::SettingsAction;
 use crate::gui::windows::shell_context_menu;
@@ -294,6 +297,7 @@ impl Default for AppSettings {
             directory_settings: vec![],
             vertical_tabs: false,
             vertical_tabs_width: crate::gui::windows::containers::tabs::VERTICAL_TABS_DEFAULT_WIDTH,
+            vertical_tab_row_height: VERTICAL_TAB_ROW_HEIGHT_DEFAULT,
             restore_tabs_on_startup: true,
         }
     }
@@ -748,6 +752,58 @@ fn draw_general_tab(
                 action = Some(SettingsAction::ApplySettings);
             }
         });
+        // Vertical tab row height. The rail reads the value every frame, so dragging
+        // previews live; it is saved once the drag ends (or on a typed/keyboard edit).
+        setting_row(
+            ui,
+            |ui| {
+                setting_label(
+                    ui,
+                    &i18n.tr("settings_vertical_tab_row_height"),
+                    Some((
+                        &i18n.tr("tooltip_settings_vertical_tab_row_height"),
+                        palette,
+                    )),
+                    palette,
+                );
+            },
+            |ui| {
+                apply_eden_visual_overrides(ui, palette);
+                // Only meaningful for the vertical rail.
+                if !settings.current_settings.vertical_tabs {
+                    ui.disable();
+                }
+                let height = &mut settings.current_settings.vertical_tab_row_height;
+                let resp = ui.add_sized(
+                    [SETTINGS_VALUE_WIDTH, ui.spacing().interact_size.y],
+                    egui::DragValue::new(height)
+                        .range(VERTICAL_TAB_ROW_HEIGHT_MIN..=VERTICAL_TAB_ROW_HEIGHT_MAX)
+                        .speed(0.2)
+                        .fixed_decimals(0)
+                        .suffix(" px"),
+                );
+                if resp.changed() {
+                    *height = height.round();
+                }
+                if resp.drag_stopped() || (resp.changed() && !resp.dragged()) {
+                    action = Some(SettingsAction::ApplySettings);
+                }
+
+                if eden_button(ui, palette, regular::ARROW_COUNTER_CLOCKWISE)
+                    .on_hover_text(format!(
+                        "{} ({VERTICAL_TAB_ROW_HEIGHT_DEFAULT} px)",
+                        i18n.tr("settings_vertical_tab_row_height_reset_hover")
+                    ))
+                    .clicked()
+                    && settings.current_settings.vertical_tab_row_height
+                        != VERTICAL_TAB_ROW_HEIGHT_DEFAULT
+                {
+                    settings.current_settings.vertical_tab_row_height =
+                        VERTICAL_TAB_ROW_HEIGHT_DEFAULT;
+                    action = Some(SettingsAction::ApplySettings);
+                }
+            },
+        );
         ui.add_space(8.0);
         // Date Style Section
         setting_row(

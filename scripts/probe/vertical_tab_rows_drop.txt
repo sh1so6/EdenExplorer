@@ -1,0 +1,29 @@
+# Vertical tab row drop highlight at the default 24 px rows: drag a file from
+# the item list over an inactive tab row, then release it over the active row
+# (never a drop target), so nothing is moved. Seed with
+# scripts/probe/seed_vertical_tab_rows and pass a scratch folder that contains
+# a few files as the launch path (opened as a 9th, active tab), e.g. from bash:
+#   mkdir -p "$TEMP/eden-vtrows-scratch" && touch "$TEMP/eden-vtrows-scratch/"{a,b,c}.txt
+#   mkdir -p "$TEMP/eden-vtrows-drop"; cp scripts/probe/seed_vertical_tab_rows/* "$TEMP/eden-vtrows-drop/"
+#   EDEN_PROBE_SCRIPT=<abs path of this file> EDEN_PROBE_DATA_DIR=<that data dir> \
+#     target/probe/release/EdenExplorer.exe "%TEMP%\eden-vtrows-scratch"
+# Rows are centered at y = 76 + 26 * i (Fonts = 154, the scratch tab = 284).
+size 1200 800
+wait_ms 1500
+shot out/vtrows_drop_0_start.png
+move 560 70
+down
+move 540 80
+move 480 110
+move 400 140
+move 380 150
+move 380 154
+wait_ms 300
+shot out/vtrows_drop_1_hover_fonts.png
+move 380 270
+move 380 284
+wait_ms 300
+up
+wait_ms 500
+shot out/vtrows_drop_2_released_on_active.png
+quit

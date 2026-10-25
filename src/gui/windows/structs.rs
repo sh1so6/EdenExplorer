@@ -61,6 +61,9 @@ pub struct AppSettings {
     /// Persisted separately in `layout.json` (not part of the postcard settings snapshot).
     pub vertical_tabs: bool,
     pub vertical_tabs_width: f32,
+    /// Row height of the vertical tab rail. Persisted in `layout.json`.
+    #[serde(default = "default_vertical_tab_row_height")]
+    pub vertical_tab_row_height: f32,
     /// Reopen the last session's tabs on startup. Persisted in `layout.json`.
     #[serde(default = "default_restore_tabs_on_startup")]
     pub restore_tabs_on_startup: bool,
@@ -68,6 +71,10 @@ pub struct AppSettings {
 
 fn default_restore_tabs_on_startup() -> bool {
     true
+}
+
+fn default_vertical_tab_row_height() -> f32 {
+    crate::gui::windows::containers::tabs::VERTICAL_TAB_ROW_HEIGHT_DEFAULT
 }
 
 #[derive(Default)]

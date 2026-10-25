@@ -1,0 +1,9 @@
+# Restart check after vertical_tab_rows.txt: reuse its data dir (do not
+# re-seed; ui-probe.ps1 recreates the data dir, so run the exe directly):
+#   EDEN_PROBE_SCRIPT=<abs path of this file> EDEN_PROBE_DATA_DIR=<that data dir> \
+#     target/probe/release/EdenExplorer.exe
+# layout.json holds 33 -> rows 33 px high, 35 px apart.
+size 1200 800
+wait_ms 1500
+shot out/vtrows_15_restart_33.png
+quit

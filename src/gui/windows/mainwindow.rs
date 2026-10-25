@@ -166,6 +166,7 @@ impl MainWindow {
             directory_settings,
             vertical_tabs: layout_settings.vertical_tabs,
             vertical_tabs_width: layout_settings.vertical_tabs_width,
+            vertical_tab_row_height: layout_settings.vertical_tab_row_height,
             restore_tabs_on_startup: layout_settings.restore_tabs_on_startup,
         };
 
@@ -833,6 +834,9 @@ impl eframe::App for MainWindow {
                                                     drag_active,
                                                     drag_hover_target.clone(),
                                                     sidebar_frame_rect.is_none(),
+                                                    self.settings_window
+                                                        .current_settings
+                                                        .vertical_tab_row_height,
                                                 ));
                                             },
                                         );

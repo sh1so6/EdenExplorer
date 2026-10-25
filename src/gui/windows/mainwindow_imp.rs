@@ -659,6 +659,10 @@ impl MainWindow {
         save_layout_settings(&LayoutSettingsSnapshot {
             vertical_tabs: self.settings_window.current_settings.vertical_tabs,
             vertical_tabs_width: self.settings_window.current_settings.vertical_tabs_width,
+            vertical_tab_row_height: self
+                .settings_window
+                .current_settings
+                .vertical_tab_row_height,
             sidebar_width: self.sidebar_state.sidebar_default_width,
             sidebar_collapsed: self.sidebar_collapsed,
             tags_dock_open: self.tags_dock_open,

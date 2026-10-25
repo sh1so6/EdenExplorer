@@ -1,0 +1,46 @@
+{
+  "version": 1,
+  "tabs": [
+    {
+      "primary": "C:\\Windows",
+      "split": null,
+      "focused_secondary": false
+    },
+    {
+      "primary": "::MY_PC::",
+      "split": null,
+      "focused_secondary": false
+    },
+    {
+      "primary": "C:\\Windows\\System32",
+      "split": null,
+      "focused_secondary": false
+    },
+    {
+      "primary": "C:\\Windows\\Fonts",
+      "split": null,
+      "focused_secondary": false
+    },
+    {
+      "primary": "C:\\Program Files",
+      "split": null,
+      "focused_secondary": false
+    },
+    {
+      "primary": "C:\\Windows\\System32\\drivers\\etc",
+      "split": null,
+      "focused_secondary": false
+    },
+    {
+      "primary": "C:\\Users",
+      "split": null,
+      "focused_secondary": false
+    },
+    {
+      "primary": "C:\\Windows\\Web\\Wallpaper",
+      "split": null,
+      "focused_secondary": false
+    }
+  ],
+  "active_tab": 2
+}

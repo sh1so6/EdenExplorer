@@ -7,6 +7,7 @@ use crate::gui::windows::containers::sidebar::{
 };
 use crate::gui::windows::containers::structs::{GalleryThumbnailSize, ItemViewerDisplayMode};
 use crate::gui::windows::containers::tabs::{
+    VERTICAL_TAB_ROW_HEIGHT_DEFAULT, VERTICAL_TAB_ROW_HEIGHT_MAX, VERTICAL_TAB_ROW_HEIGHT_MIN,
     VERTICAL_TABS_DEFAULT_WIDTH, VERTICAL_TABS_MAX_WIDTH, VERTICAL_TABS_MIN_WIDTH,
 };
 use crate::gui::windows::containers::tags::{
@@ -574,6 +575,8 @@ pub fn save_app_settings(
 pub struct LayoutSettingsSnapshot {
     pub vertical_tabs: bool,
     pub vertical_tabs_width: f32,
+    /// Row height of the vertical tab rail (points).
+    pub vertical_tab_row_height: f32,
     /// Preferred expanded sidebar width (points). Clamped to the window when drawn.
     pub sidebar_width: f32,
     /// Whether the sidebar is collapsed to its icon strip.
@@ -591,6 +594,7 @@ impl Default for LayoutSettingsSnapshot {
         Self {
             vertical_tabs: false,
             vertical_tabs_width: VERTICAL_TABS_DEFAULT_WIDTH,
+            vertical_tab_row_height: VERTICAL_TAB_ROW_HEIGHT_DEFAULT,
             sidebar_width: SIDEBAR_DEFAULT_WIDTH,
             sidebar_collapsed: false,
             tags_dock_open: false,
@@ -610,6 +614,12 @@ impl LayoutSettingsSnapshot {
             VERTICAL_TABS_MIN_WIDTH,
             VERTICAL_TABS_MAX_WIDTH,
             VERTICAL_TABS_DEFAULT_WIDTH,
+        );
+        self.vertical_tab_row_height = sanitize_width(
+            self.vertical_tab_row_height,
+            VERTICAL_TAB_ROW_HEIGHT_MIN,
+            VERTICAL_TAB_ROW_HEIGHT_MAX,
+            VERTICAL_TAB_ROW_HEIGHT_DEFAULT,
         );
         self.sidebar_width = sanitize_width(
             self.sidebar_width,
@@ -968,6 +978,8 @@ mod tests {
         let old = load_layout_settings_from(&path);
         assert!(old.vertical_tabs);
         assert_eq!(old.vertical_tabs_width, 136.0);
+        // Builds without the row height setting: the compact default.
+        assert_eq!(old.vertical_tab_row_height, VERTICAL_TAB_ROW_HEIGHT_DEFAULT);
         assert_eq!(old.sidebar_width, SIDEBAR_DEFAULT_WIDTH);
         assert!(!old.sidebar_collapsed);
         assert!(!old.tags_dock_open);
@@ -980,6 +992,7 @@ mod tests {
         let snapshot = LayoutSettingsSnapshot {
             vertical_tabs: true,
             vertical_tabs_width: 333.0,
+            vertical_tab_row_height: 33.0,
             sidebar_width: 517.5,
             sidebar_collapsed: true,
             tags_dock_open: true,
@@ -998,6 +1011,16 @@ mod tests {
         let clamped = load_layout_settings_from(&path);
         assert_eq!(clamped.vertical_tabs_width, VERTICAL_TABS_MIN_WIDTH);
         assert_eq!(clamped.sidebar_width, SIDEBAR_MAX_WIDTH);
+        std::fs::write(&path, r#"{ "vertical_tab_row_height": 2.0 }"#).unwrap();
+        assert_eq!(
+            load_layout_settings_from(&path).vertical_tab_row_height,
+            VERTICAL_TAB_ROW_HEIGHT_MIN
+        );
+        std::fs::write(&path, r#"{ "vertical_tab_row_height": 400.0 }"#).unwrap();
+        assert_eq!(
+            load_layout_settings_from(&path).vertical_tab_row_height,
+            VERTICAL_TAB_ROW_HEIGHT_MAX
+        );
         std::fs::write(&path, r#"{ "sidebar_width": 10.0 }"#).unwrap();
         assert_eq!(
             load_layout_settings_from(&path).sidebar_width,

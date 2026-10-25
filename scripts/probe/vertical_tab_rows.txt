@@ -1,0 +1,121 @@
+# Vertical tab row height (Settings > General > Vertical tab row height).
+# Run with -Seed scripts/probe/seed_vertical_tab_rows: vertical tabs on, a
+# layout.json without "vertical_tab_row_height" (-> 24 px default) and 8 restored
+# tabs (Windows, This PC, System32 (active), Fonts, Program Files, etc, Users,
+# Wallpaper). Use a dedicated -DataDir and read its layout.json after the run:
+# it ends at 33 (min, max, reset, typed 40, then a drag to 33).
+# 1200x800 = the default custom window size, which every applied setting
+# re-applies to the window.
+# At 24 px rows (2 px gap) row i is centered at y = 76 + 26 * i; the tab icon
+# (pin button) sits at x = 281.
+size 1200 800
+wait_ms 1500
+shot out/vtrows_1_default_24.png
+
+# Hover an inactive row.
+move 380 102
+wait_ms 300
+shot out/vtrows_2_hover_row.png
+
+# Hover the tab icon (pin button) of Fonts: pin glyph + tooltip.
+move 281 154
+wait_ms 800
+shot out/vtrows_3_hover_pin.png
+
+# Pin Users, then hover the active row.
+click 281 232
+wait_ms 300
+move 380 128
+wait_ms 300
+shot out/vtrows_4_pinned_active_hover.png
+
+# Settings > General (a fixed, centered modal; it covers most of the rail):
+# row height DragValue 840,417, reset 777,417, close 882,143.
+click 18 18
+wait_ms 400
+click 50 70
+wait_ms 600
+move 840 417
+wait_ms 300
+shot out/vtrows_5_settings_control.png
+
+# Drag left past the minimum: the (dimmed) rail, visible left of the modal,
+# previews live while dragging; the value is saved when the drag ends.
+move 840 417
+down
+move 820 417
+move 800 417
+move 780 417
+move 760 417
+wait_ms 300
+shot out/vtrows_6_settings_min_live_dragging.png
+up
+wait_ms 300
+
+# Close the settings window and look at the 20 px rows (centers 74 + 22 * i).
+click 882 143
+wait_ms 400
+move 380 96
+wait_ms 300
+shot out/vtrows_7_min_20_hover.png
+
+# Back to settings, drag right past the maximum.
+click 18 18
+wait_ms 400
+click 50 70
+wait_ms 600
+drag 840 417 1000 417 20
+wait_ms 300
+shot out/vtrows_8_settings_max.png
+click 882 143
+wait_ms 400
+# 40 px rows: centers 84 + 42 * i.
+move 380 126
+wait_ms 300
+shot out/vtrows_9_max_40_hover.png
+
+# Reset button tooltip, then reset to 24 px.
+click 18 18
+wait_ms 400
+click 50 70
+wait_ms 600
+move 777 417
+wait_ms 800
+shot out/vtrows_10_reset_tooltip.png
+click 777 417
+wait_ms 300
+click 882 143
+wait_ms 400
+move 1000 790
+wait_ms 300
+shot out/vtrows_11_reset_24.png
+
+# Typed edit: click the value, select all, type 40, Enter (saved without a drag).
+click 18 18
+wait_ms 400
+click 50 70
+wait_ms 600
+click 840 417
+wait_ms 200
+key A ctrl
+text 40
+key Enter
+wait_ms 300
+shot out/vtrows_12_typed_40.png
+
+# With vertical tabs off the control is disabled (checkbox 322,390).
+click 322 390
+wait_ms 300
+move 840 417
+wait_ms 300
+shot out/vtrows_13_disabled_when_horizontal.png
+click 322 390
+wait_ms 300
+
+# Drag-only change: 40 px left at speed 0.2 gives 40 -> 33 (DragValue's pointer
+# smoothing), saved at drag end. Relaunch with the same data dir
+# (vertical_tab_rows_restart.txt) to check the 33 px rows.
+drag 840 417 800 417 10
+wait_ms 300
+shot out/vtrows_14_dragged_33.png
+quit
