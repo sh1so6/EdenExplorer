@@ -17,6 +17,7 @@ use crate::gui::windows::containers::itemviewer_helper::{
 use crate::gui::windows::containers::structs::{
     DragState, ExplorerState, GalleryState, GalleryThumbnailSize, RenameState,
 };
+use crate::gui::windows::double_click;
 use crate::gui::windows::structs::{SettingsWindow, ThemeCustomizer};
 use eframe::egui;
 use egui::containers::{Popup, PopupCloseBehavior};
@@ -264,7 +265,7 @@ pub fn draw_gallery_view(
                                 drag_state,
                                 explorer_state,
                                 false,
-                                response.double_clicked(),
+                                double_click::is_double_click(&response),
                             ) {
                                 action = Some(a);
                             }
@@ -317,7 +318,7 @@ pub fn draw_gallery_view(
                         action = Some(ItemViewerAction::DeselectAll);
                     }
                     // Double-click on empty space goes up one level.
-                    if bg_response.double_clicked() {
+                    if double_click::is_double_click(&bg_response) {
                         action = Some(ItemViewerAction::NavigateUp);
                     }
 

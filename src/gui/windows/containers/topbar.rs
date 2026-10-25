@@ -332,7 +332,7 @@ fn draw_drag_region(ui: &mut egui::Ui, hwnd: Option<HWND>) {
     let drag_rect = ui.available_rect_before_wrap();
     if drag_rect.width() > 0.0 && drag_rect.height() > 0.0 {
         let resp = ui.allocate_rect(drag_rect, egui::Sense::click_and_drag());
-        if resp.double_clicked() {
+        if crate::gui::windows::double_click::is_double_click(&resp) {
             if let Some(hwnd) = hwnd {
                 toggle_window_fullscreen(hwnd);
             }

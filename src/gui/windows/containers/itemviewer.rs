@@ -15,6 +15,7 @@ use crate::gui::windows::containers::structs::{
     ItemViewerDisplayMode, ItemViewerFolderSizeState, ItemViewerLayout, ItemViewerNavBarAction,
     RenameState, TabView, TagInfo, TagsState,
 };
+use crate::gui::windows::double_click;
 use crate::gui::windows::structs::{SettingsWindow, ThemeCustomizer};
 use eframe::egui;
 use egui::containers::{Popup, PopupCloseBehavior};
@@ -566,7 +567,7 @@ pub fn draw_item_viewer(
                                 drag_state,
                                 explorer_state,
                                 is_recycle_bin_view,
-                                row_resp.double_clicked(),
+                                double_click::is_double_click(&row_resp),
                             ) {
                                 action = Some(a);
                             }
@@ -656,15 +657,15 @@ pub fn draw_item_viewer(
             }
 
             let divider_tolerance = ui.style().interaction.resize_grab_radius_side + 3.0;
+            let divider_double_clicked = double_click::primary_double_clicked(ui.ctx());
             let divider_double_clicked_column = ui.ctx().input(|input| {
+                if !divider_double_clicked {
+                    return None;
+                }
                 let Some(pointer_pos) = input.pointer.interact_pos() else {
                     return None;
                 };
-                if !input
-                    .pointer
-                    .button_double_clicked(egui::PointerButton::Primary)
-                    || !table_rect.contains(pointer_pos)
-                {
+                if !table_rect.contains(pointer_pos) {
                     return None;
                 }
 
@@ -689,7 +690,7 @@ pub fn draw_item_viewer(
                 let resize_id = table_state_id.with("resize_column").with(index);
                 ui.ctx()
                     .read_response(resize_id)
-                    .filter(|response| response.double_clicked())
+                    .filter(double_click::is_double_click)
                     .and_then(|_| {
                         index
                             .checked_sub(checkbox_column_count)
@@ -758,7 +759,7 @@ pub fn draw_item_viewer(
                 }
                 // Double-click on empty space goes up one level (unless the
                 // double-click was a column divider auto-fit).
-                if bg_response.double_clicked()
+                if double_click::is_double_click(&bg_response)
                     && !matches!(action, Some(ItemViewerAction::FitColumn(_)))
                 {
                     action = Some(ItemViewerAction::NavigateUp);

@@ -118,7 +118,7 @@ pub fn handle_window_drag_area(
 ) {
     let resp = ui.interact(rect, id, egui::Sense::click_and_drag());
 
-    if resp.double_clicked() {
+    if crate::gui::windows::double_click::is_double_click(&resp) {
         if let Some(hwnd) = hwnd {
             toggle_window_fullscreen(hwnd);
         }

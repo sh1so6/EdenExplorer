@@ -18,6 +18,7 @@ use crate::gui::windows::containers::structs::{
     ItemViewerColumnState, ItemViewerColumnWidths, ItemViewerFolderSizeState, ItemViewerLayout,
     ItemViewerNavBarAction, PendingItemMenu, RenameState, TabView,
 };
+use crate::gui::windows::double_click;
 use crate::gui::windows::eden_menu_entries::{self, EdenMenuEntry, EdenMenuSlot};
 use crate::gui::windows::shell_context_menu::{
     self, AppMenuItem, AppSubmenu, NativeMenuChoice, ShellContextMenu,
@@ -2491,7 +2492,7 @@ pub fn draw_empty_item_viewer_area(
     }
 
     // Double-click on the empty folder area goes up one level.
-    if response.double_clicked() {
+    if double_click::is_double_click(&response) {
         action = Some(ItemViewerAction::NavigateUp);
     }
 

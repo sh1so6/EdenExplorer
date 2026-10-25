@@ -198,7 +198,8 @@ fn draw_hotkeys_tab(
                         egui::FontId::monospace(palette.text_size),
                         shortcut_color,
                     );
-                    shortcut_double_clicked = can_rebind && response.double_clicked();
+                    shortcut_double_clicked =
+                        can_rebind && crate::gui::windows::double_click::is_double_click(&response);
                     // Keep descriptions inside the settings window. Without an explicit
                     // width, a larger font makes the row's content determine the window
                     // width and can cause the shortcuts view to grow horizontally.

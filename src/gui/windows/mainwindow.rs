@@ -388,6 +388,8 @@ impl eframe::App for MainWindow {
         if crate::gui::windows::windowsoverrides::take_external_close_request() {
             ui.ctx().send_viewport_cmd(egui::ViewportCommand::Close);
         }
+        // Before any widget checks for a double-click this frame.
+        crate::gui::windows::double_click::begin_frame(ui.ctx());
         self.sync_manual_window_size();
         {
             let forwarded_paths = take_forwarded_paths();
