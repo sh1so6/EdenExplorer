@@ -84,6 +84,146 @@ pub fn request_repaint() {
     }
 }
 
+// ---------------------------------------------------------------------------
+// winit's event target window vs. an external WM_CLOSE
+//
+// winit creates one hidden helper window per event loop on the UI thread.
+// It is WS_VISIBLE (layered and transparent, so never drawn) because it
+// needs WM_PAINT. A graceful kill (`taskkill` without /F, task managers,
+// installers) posts WM_CLOSE to every *visible* top-level window of the
+// process. winit's procedure for that window passes WM_CLOSE to
+// DefWindowProc, which destroys it. `EventLoopProxy` wakes the loop by
+// posting to that window and eframe requests every repaint through the
+// proxy, so the app then never renders again and never exits. Until the
+// main window is shown (after the first frames) the helper window is the
+// only window such a WM_CLOSE reaches; later the main window gets one too
+// and closes the app normally.
+//
+// The helper window is subclassed as soon as winit creates it (a thread-local
+// CBT hook installed before the event loop) and a WM_CLOSE to it becomes a
+// close request of the app, handled on the next frame.
+
+/// Class of winit's helper window (`THREAD_EVENT_TARGET_WINDOW_CLASS`,
+/// winit 0.30.13 `src/platform_impl/windows/event_loop.rs:904`, created at
+/// :939). Recheck on winit upgrades; [`finish_event_target_close_guard`]
+/// warns when it no longer matches.
+const WINIT_EVENT_TARGET_CLASS: &str = "Winit Thread Event Target";
+
+/// CBT hook installed by [`install_event_target_close_guard`]; null once
+/// removed.
+static EVENT_TARGET_HOOK: AtomicPtr<std::ffi::c_void> = AtomicPtr::new(std::ptr::null_mut());
+/// winit's window procedure of the subclassed helper window.
+static EVENT_TARGET_ORIGINAL_WNDPROC: AtomicPtr<std::ffi::c_void> =
+    AtomicPtr::new(std::ptr::null_mut());
+/// The subclassed helper window.
+static EVENT_TARGET_HWND: AtomicPtr<std::ffi::c_void> = AtomicPtr::new(std::ptr::null_mut());
+/// Set when the helper window received WM_CLOSE; taken by the app's frame.
+static EXTERNAL_CLOSE_REQUESTED: AtomicBool = AtomicBool::new(false);
+
+/// Guards winit's helper window against WM_CLOSE (see above). Call on the UI
+/// thread right before `eframe::run_native`; the hook removes itself once the
+/// window is subclassed.
+pub fn install_event_target_close_guard() {
+    let thread = unsafe { windows::Win32::System::Threading::GetCurrentThreadId() };
+    match unsafe { SetWindowsHookExW(WH_CBT, Some(event_target_cbt_hook), None, thread) } {
+        Ok(hook) => EVENT_TARGET_HOOK.store(hook.0, Ordering::SeqCst),
+        Err(err) => eprintln!("Event target close guard not installed: {err}"),
+    }
+}
+
+/// First frame: removes the hook if it is still installed and warns when the
+/// helper window was not subclassed (an external WM_CLOSE would then stop the
+/// app's rendering again).
+pub fn finish_event_target_close_guard() {
+    remove_event_target_hook();
+    let target = EVENT_TARGET_HWND.load(Ordering::SeqCst);
+    let guarded = !target.is_null()
+        && unsafe { GetWindowLongPtrW(HWND(target), GWLP_WNDPROC) }
+            == event_target_wndproc as *const () as isize;
+    if !guarded {
+        eprintln!(
+            "winit event target window not guarded (class '{WINIT_EVENT_TARGET_CLASS}'): \
+             an external WM_CLOSE may leave the app hanging"
+        );
+    }
+}
+
+/// Whether the app was asked to close through winit's helper window since
+/// the last call. Cheap enough for every frame.
+pub fn take_external_close_request() -> bool {
+    EXTERNAL_CLOSE_REQUESTED.load(Ordering::Relaxed)
+        && EXTERNAL_CLOSE_REQUESTED.swap(false, Ordering::AcqRel)
+}
+
+fn remove_event_target_hook() {
+    let hook = EVENT_TARGET_HOOK.swap(std::ptr::null_mut(), Ordering::SeqCst);
+    if !hook.is_null() {
+        let _ = unsafe { UnhookWindowsHookEx(HHOOK(hook)) };
+    }
+}
+
+fn has_class_name(hwnd: HWND, name: &str) -> bool {
+    let mut buf = [0u16; 64];
+    let len = unsafe { GetClassNameW(hwnd, &mut buf) };
+    len > 0 && name.encode_utf16().eq(buf[..len as usize].iter().copied())
+}
+
+unsafe extern "system" fn event_target_cbt_hook(
+    code: i32,
+    wparam: WPARAM,
+    lparam: LPARAM,
+) -> LRESULT {
+    // HCBT_CREATEWND comes before WM_NCCREATE: no message reaches the window
+    // before it is subclassed.
+    if code == HCBT_CREATEWND as i32 {
+        let hwnd = HWND(wparam.0 as *mut std::ffi::c_void);
+        if has_class_name(hwnd, WINIT_EVENT_TARGET_CLASS) {
+            subclass_event_target(hwnd);
+            remove_event_target_hook();
+        }
+    }
+    unsafe { CallNextHookEx(None, code, wparam, lparam) }
+}
+
+fn subclass_event_target(hwnd: HWND) {
+    unsafe {
+        // Stored before the switch, so every message can be passed on.
+        let original = GetWindowLongPtrW(hwnd, GWLP_WNDPROC);
+        if original == 0 {
+            return;
+        }
+        EVENT_TARGET_ORIGINAL_WNDPROC.store(original as *mut std::ffi::c_void, Ordering::SeqCst);
+        let proc = event_target_wndproc as *const () as isize;
+        if SetWindowLongPtrW(hwnd, GWLP_WNDPROC, proc) != 0 {
+            EVENT_TARGET_HWND.store(hwnd.0, Ordering::SeqCst);
+        }
+    }
+}
+
+unsafe extern "system" fn event_target_wndproc(
+    hwnd: HWND,
+    msg: u32,
+    wparam: WPARAM,
+    lparam: LPARAM,
+) -> LRESULT {
+    if msg == WM_CLOSE {
+        // Keep the window; close the app instead. Before the app exists the
+        // flag waits for the first frame (which runs anyway).
+        EXTERNAL_CLOSE_REQUESTED.store(true, Ordering::Release);
+        request_repaint();
+        return LRESULT(0);
+    }
+    let original = EVENT_TARGET_ORIGINAL_WNDPROC.load(Ordering::SeqCst);
+    unsafe {
+        if original.is_null() {
+            DefWindowProcW(hwnd, msg, wparam, lparam)
+        } else {
+            let original = std::mem::transmute::<*mut std::ffi::c_void, WNDPROC>(original);
+            CallWindowProcW(original, hwnd, msg, wparam, lparam)
+        }
+    }
+}
+
 pub fn consume_clipboard_dirty() -> bool {
     CLIPBOARD_DIRTY.swap(false, Ordering::AcqRel)
 }

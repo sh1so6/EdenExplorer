@@ -5,7 +5,7 @@ mod gui;
 use crate::core::indexer::{WindowSizeMode, load_windows_size_mode_on_start};
 use crate::core::launch::{LaunchError, acquire_or_forward, existing_directories, parse_args};
 use crate::core::utils::fonts::apply_custom_font_definitions;
-use crate::gui::windows::windowsoverrides::set_egui_ctx;
+use crate::gui::windows::windowsoverrides::{install_event_target_close_guard, set_egui_ctx};
 use eframe::{NativeOptions, egui};
 use std::os::windows::ffi::OsStrExt;
 use windows::Win32::System::Com::{COINIT_APARTMENTTHREADED, CoInitializeEx};
@@ -81,6 +81,10 @@ fn main() -> eframe::Result<()> {
     };
     #[cfg(feature = "ui-probe")]
     let options = crate::core::probe::adjust_native_options(options);
+
+    // Before the event loop creates its helper window: keeps an external
+    // WM_CLOSE from stopping the app (see the function).
+    install_event_target_close_guard();
 
     eframe::run_native(
         "EdenExplorer",

@@ -383,6 +383,11 @@ impl MainWindow {
 
 impl eframe::App for MainWindow {
     fn ui(&mut self, ui: &mut egui::Ui, frame: &mut eframe::Frame) {
+        // WM_CLOSE sent to winit's helper window (e.g. `taskkill` before the
+        // main window is shown): close like the title bar's close button.
+        if crate::gui::windows::windowsoverrides::take_external_close_request() {
+            ui.ctx().send_viewport_cmd(egui::ViewportCommand::Close);
+        }
         self.sync_manual_window_size();
         {
             let forwarded_paths = take_forwarded_paths();
@@ -404,6 +409,7 @@ impl eframe::App for MainWindow {
                         eprintln!("Failed to install wndproc: {}", e);
                     }
                 }
+                crate::gui::windows::windowsoverrides::finish_event_target_close_guard();
 
                 self.dragdrop = Some(Box::new(
                     crate::gui::windows::dragdrop::WindowsDragDropBackend::new(Some(hwnd)),
