@@ -390,6 +390,8 @@ impl eframe::App for MainWindow {
         }
         // Before any widget checks for a double-click this frame.
         crate::gui::windows::double_click::begin_frame(ui.ctx());
+        // Before the address bar or any other text input can drop its focus.
+        crate::gui::windows::text_input_focus::begin_frame(ui.ctx());
         self.sync_manual_window_size();
         {
             let forwarded_paths = take_forwarded_paths();
@@ -1699,6 +1701,7 @@ impl eframe::App for MainWindow {
         self.persist_session_if_changed(ui.ctx());
 
         self.icon_cache = Some(icon_cache);
+        crate::gui::windows::text_input_focus::end_frame(ui.ctx());
     }
 
     /// Runs on every graceful exit (title-bar close, Exit menu, an external

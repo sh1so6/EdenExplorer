@@ -81,7 +81,15 @@ pub fn draw_item_viewer(
         tags_state.picker.is_some() || theme_customizer_window.open || settings_window.open;
     // The docked tags panel has keyboard focus: no explorer keyboard handling
     // (Delete, F2, Ctrl+A/C/X/V, type-to-filter, arrow selection, ...).
-    let keyboard_captured = tags_state.keyboard_captured;
+    // The same applies while a text input (address bar, rename box, ...) owns
+    // the keyboard: keys typed there must not open, delete or select items.
+    // This view's own filter box is the exception; `handle_global_actions`
+    // handles its keys.
+    let keyboard_captured = tags_state.keyboard_captured
+        || crate::gui::windows::text_input_focus::text_input_owns_keyboard(
+            ui.ctx(),
+            Some(ui.id().with("filter_input")),
+        );
 
     let mut action: Option<ItemViewerAction> = None;
 
