@@ -6,6 +6,10 @@ use crate::core::indexer::{
     load_app_settings, save_app_settings, save_favorites, save_layout_settings,
     save_sidebar_settings, save_tags, save_theme_settings,
 };
+use crate::core::session::{
+    SESSION_RETRY_DELAY, SESSION_VERSION, SessionSavePoll, SessionSnapshot, SessionTab,
+    SessionTabKey, merge_launch_paths, save_session, session_path_for, session_signature,
+};
 use crate::gui::MainWindow;
 use crate::gui::i18n::I18n;
 use crate::gui::theme::{
@@ -320,6 +324,184 @@ impl MainWindow {
         self.mark_tab_infos_dirty();
     }
 
+    /// Replaces the startup tabs with the tabs of a saved session (ids 1..n,
+    /// split views and the focused side included). Paths are used as-is, with
+    /// no existence check: a stalled network or cloud drive must not block
+    /// startup, and a missing folder just loads as an empty view like any
+    /// failed load. Pinned tabs missing from the session open first, as they
+    /// do on a start without a session. Nothing is loaded here.
+    pub(crate) fn restore_session(&mut self, session: SessionSnapshot) {
+        let settings = self.settings_window.current_settings.clone();
+        let mut entries: Vec<SessionTab> = settings
+            .pinned_tabs
+            .iter()
+            .filter(|pinned| !session.tabs.iter().any(|tab| &tab.primary == *pinned))
+            .map(|pinned| SessionTab {
+                primary: pinned.clone(),
+                split: None,
+                focused_secondary: false,
+            })
+            .collect();
+        let pinned_added = entries.len();
+        entries.extend(session.tabs);
+        if entries.is_empty() {
+            return;
+        }
+
+        let mut tabs = Vec::with_capacity(entries.len());
+        let mut next_id = 1;
+        for entry in &entries {
+            let mut tab = TabState::new(
+                next_id,
+                Navigation::new(entry.primary.clone()),
+                settings.sort_column,
+                settings.sort_ascending,
+            );
+            apply_directory_settings_to_view(&mut tab.primary_view, &settings);
+            if let Some(split) = entry.split.as_ref() {
+                let mut view = tab.primary_view.duplicate_as_new();
+                view.nav = Navigation::new(split.clone());
+                apply_directory_settings_to_view(&mut view, &settings);
+                tab.split_view = Some(view);
+            }
+            tabs.push(tab);
+            next_id += 1;
+        }
+
+        // The replaced startup tabs were never loaded: no workers to stop.
+        self.tabs = tabs;
+        self.next_tab_id = next_id;
+        self.active_tab = (session.active_tab + pinned_added).min(self.tabs.len() - 1);
+        let focus_split =
+            entries[self.active_tab].focused_secondary && self.active_tab().split_view.is_some();
+        self.focused_split = if focus_split {
+            SplitSide::Secondary
+        } else {
+            SplitSide::Primary
+        };
+        self.pending_tab_scroll_id = Some(self.active_tab().id);
+        self.mark_tab_infos_dirty();
+    }
+
+    /// After a session restore: activates the tab of a launch path that is
+    /// already open instead of duplicating it, appends the others, and leaves
+    /// the last launch path's tab active. Nothing is loaded here.
+    pub(crate) fn open_launch_paths_after_restore(&mut self, paths: &[PathBuf]) {
+        let existing: Vec<PathBuf> = self
+            .tabs
+            .iter()
+            .map(|tab| tab.primary_view.nav.current.clone())
+            .collect();
+        let merge = merge_launch_paths(&existing, paths);
+        for path in merge.append {
+            self.open_new_tab(path);
+        }
+        if let Some(index) = merge.activate.filter(|index| *index < self.tabs.len()) {
+            self.active_tab = index;
+            self.focused_split = SplitSide::Primary;
+            self.pending_tab_scroll_id = Some(self.tabs[index].id);
+            self.mark_tab_infos_dirty();
+        }
+    }
+
+    /// Loads the active tab's view(s), as activating a tab does.
+    pub(crate) fn load_active_tab_views(&mut self) {
+        self.load_view(SplitSide::Primary);
+        if self.active_tab().split_view.is_some() {
+            self.load_view(SplitSide::Secondary);
+        }
+    }
+
+    /// Fingerprint of the state stored in `session.json` (see
+    /// [`session_signature`]). The focused side is window-global, so only the
+    /// active tab can have its split side focused.
+    fn current_session_signature(&self) -> u64 {
+        let secondary_focused = self.focused_split == SplitSide::Secondary;
+        session_signature(
+            self.tabs
+                .iter()
+                .enumerate()
+                .map(|(index, tab)| SessionTabKey {
+                    id: tab.id,
+                    primary: tab.primary_view.nav.current.as_path(),
+                    split: tab
+                        .split_view
+                        .as_ref()
+                        .map(|view| view.nav.current.as_path()),
+                    focused_secondary: secondary_focused
+                        && index == self.active_tab
+                        && tab.split_view.is_some(),
+                }),
+            self.active_tab,
+        )
+    }
+
+    fn current_session_snapshot(&self) -> SessionSnapshot {
+        let secondary_focused = self.focused_split == SplitSide::Secondary;
+        SessionSnapshot {
+            version: SESSION_VERSION,
+            tabs: self
+                .tabs
+                .iter()
+                .enumerate()
+                .map(|(index, tab)| SessionTab {
+                    primary: session_path_for(&tab.primary_view.nav.current),
+                    split: tab
+                        .split_view
+                        .as_ref()
+                        .map(|view| session_path_for(&view.nav.current)),
+                    focused_secondary: secondary_focused
+                        && index == self.active_tab
+                        && tab.split_view.is_some(),
+                })
+                .collect(),
+            active_tab: self.active_tab,
+        }
+    }
+
+    fn write_session(&mut self, signature: u64, ctx: Option<&egui::Context>) {
+        match save_session(&self.current_session_snapshot()) {
+            Ok(()) => self.session_scheduler.mark_saved(signature),
+            Err(error) => {
+                eprintln!("Failed to save session.json: {error}");
+                self.session_scheduler.mark_failed(Instant::now());
+                if let Some(ctx) = ctx {
+                    ctx.request_repaint_after(SESSION_RETRY_DELAY);
+                }
+            }
+        }
+    }
+
+    /// Called every frame: when the tabs differ from the saved session, writes
+    /// `session.json` about a second later (a repaint is scheduled for it, so
+    /// it also happens while idle). Costs one O(tabs) hash per frame.
+    pub(crate) fn persist_session_if_changed(&mut self, ctx: &egui::Context) {
+        if !self.session_persist {
+            return;
+        }
+        let signature = self.current_session_signature();
+        let now = Instant::now();
+        match self.session_scheduler.poll(signature, now) {
+            SessionSavePoll::Idle => {}
+            SessionSavePoll::WaitUntil(due) => {
+                ctx.request_repaint_after(due.saturating_duration_since(now));
+            }
+            SessionSavePoll::SaveNow => self.write_session(signature, Some(ctx)),
+        }
+    }
+
+    /// Writes unsaved session changes immediately (exit path; a pending
+    /// delayed write is included). No-op when nothing changed.
+    pub(crate) fn flush_session(&mut self) {
+        if !self.session_persist {
+            return;
+        }
+        let signature = self.current_session_signature();
+        if self.session_scheduler.is_dirty(signature) {
+            self.write_session(signature, None);
+        }
+    }
+
     pub fn default_favorites(&self) -> Vec<FavoriteItem> {
         let mut favorites = Vec::new();
         if let Some(home) = dirs::home_dir() {
@@ -481,6 +663,10 @@ impl MainWindow {
             sidebar_collapsed: self.sidebar_collapsed,
             tags_dock_open: self.tags_dock_open,
             tags_dock_height: self.tags_dock_height,
+            restore_tabs_on_startup: self
+                .settings_window
+                .current_settings
+                .restore_tabs_on_startup,
         });
     }
 
@@ -1308,6 +1494,9 @@ impl MainWindow {
 
     fn cleanup_resources(&mut self) {
         println!("Cleaning up resources...");
+
+        // Normally already done by `on_exit`; covers any other teardown path.
+        self.flush_session();
 
         self.sync_manual_window_size();
 

@@ -5,6 +5,7 @@ pub mod launch;
 pub mod portable;
 #[cfg(feature = "ui-probe")]
 pub mod probe;
+pub mod session;
 pub mod utils;
 
 /// `true` when running as the dev-only UI probe (`ui-probe` feature and

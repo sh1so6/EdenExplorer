@@ -306,7 +306,7 @@ fn default_next_tag_group_id() -> u64 {
 
 /// Root of all persisted app data (`%LOCALAPPDATA%\ExplorerEden`). In UI probe
 /// mode this is redirected to an isolated directory.
-fn app_data_dir() -> Option<PathBuf> {
+pub(crate) fn app_data_dir() -> Option<PathBuf> {
     #[cfg(feature = "ui-probe")]
     if let Some(dir) = crate::core::probe::data_dir_override() {
         return Some(dir);
@@ -582,6 +582,8 @@ pub struct LayoutSettingsSnapshot {
     pub tags_dock_open: bool,
     /// Preferred tags panel height (points). Clamped to the window when drawn.
     pub tags_dock_height: f32,
+    /// Reopen the tabs of the last session (`session.json`) on startup.
+    pub restore_tabs_on_startup: bool,
 }
 
 impl Default for LayoutSettingsSnapshot {
@@ -593,6 +595,7 @@ impl Default for LayoutSettingsSnapshot {
             sidebar_collapsed: false,
             tags_dock_open: false,
             tags_dock_height: TAGS_DOCK_DEFAULT_HEIGHT,
+            restore_tabs_on_startup: true,
         }
     }
 }
@@ -969,6 +972,8 @@ mod tests {
         assert!(!old.sidebar_collapsed);
         assert!(!old.tags_dock_open);
         assert_eq!(old.tags_dock_height, TAGS_DOCK_DEFAULT_HEIGHT);
+        // Builds without the session feature: restoring defaults to on.
+        assert!(old.restore_tabs_on_startup);
 
         // Round trip (also creates the missing parent dir).
         let _ = std::fs::remove_dir_all(&dir);
@@ -979,6 +984,7 @@ mod tests {
             sidebar_collapsed: true,
             tags_dock_open: true,
             tags_dock_height: 321.0,
+            restore_tabs_on_startup: false,
         };
         save_layout_settings_to(&path, &snapshot);
         assert_eq!(load_layout_settings_from(&path), snapshot);

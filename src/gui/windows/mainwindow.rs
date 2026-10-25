@@ -3,6 +3,7 @@ use crate::core::indexer::{
     load_theme_settings,
 };
 use crate::core::launch::take_forwarded_paths;
+use crate::core::session::{SessionSaveScheduler, load_session};
 use crate::core::utils::tabs::update_tab_infos_cache;
 use crate::gui::dragdrop::{DragDropBackend, DropTargets};
 use crate::gui::i18n::I18n;
@@ -103,6 +104,9 @@ pub struct MainWindow {
     pub(crate) folder_size_text_cache: HashMap<PathBuf, (u64, bool, String)>,
     pub(crate) drive_size_text_cache: HashMap<PathBuf, (u64, u64, String)>,
     pub(crate) column_settings_save_due: Option<Instant>,
+    /// Whether this window writes `session.json` (false for `--new-window`).
+    pub(crate) session_persist: bool,
+    pub(crate) session_scheduler: SessionSaveScheduler,
 
     // Sidebar Variables
     pub(crate) sidebar_state: SidebarState,
@@ -114,8 +118,10 @@ pub struct MainWindow {
     pub(crate) i18n: I18n,
 }
 
-impl Default for MainWindow {
-    fn default() -> Self {
+impl MainWindow {
+    /// Builds the window state from the saved settings with the startup tabs
+    /// (start path or pinned tabs), without loading any folder yet.
+    fn build_without_loading() -> Self {
         // Load saved settings
         let (
             folder_scanning_enabled,
@@ -160,6 +166,7 @@ impl Default for MainWindow {
             directory_settings,
             vertical_tabs: layout_settings.vertical_tabs,
             vertical_tabs_width: layout_settings.vertical_tabs_width,
+            restore_tabs_on_startup: layout_settings.restore_tabs_on_startup,
         };
 
         let system_locale = sys_locale::get_locale().unwrap_or_else(|| "en-US".to_string());
@@ -266,6 +273,8 @@ impl Default for MainWindow {
             folder_size_text_cache: HashMap::new(),
             drive_size_text_cache: HashMap::new(),
             column_settings_save_due: None,
+            session_persist: true,
+            session_scheduler: SessionSaveScheduler::default(),
 
             i18n: I18n::new(default_locale),
         };
@@ -326,16 +335,35 @@ impl Default for MainWindow {
                 })
                 .collect();
         }
-        app.load_path();
         app
     }
-}
 
-impl MainWindow {
-    pub fn new_with_paths(paths: Vec<PathBuf>) -> Self {
-        let mut app = Self::default();
-        if !paths.is_empty() {
-            app.open_startup_paths(&paths);
+    /// `paths`: folders given on the command line. `new_window`: started with
+    /// `--new-window`; such windows neither restore nor save the session, so
+    /// two windows never overwrite each other's `session.json`.
+    pub fn new_with_paths(paths: Vec<PathBuf>, new_window: bool) -> Self {
+        let mut app = Self::build_without_loading();
+        app.session_persist = !new_window;
+
+        let session = if !new_window && app.settings_window.current_settings.restore_tabs_on_startup
+        {
+            load_session()
+        } else {
+            None
+        };
+
+        match session {
+            Some(session) => {
+                app.restore_session(session);
+                app.open_launch_paths_after_restore(&paths);
+                app.load_active_tab_views();
+            }
+            None => {
+                app.load_path();
+                if !paths.is_empty() {
+                    app.open_startup_paths(&paths);
+                }
+            }
         }
         app
     }
@@ -1660,8 +1688,15 @@ impl eframe::App for MainWindow {
         }
 
         self.flush_pending_column_settings_save(ui.ctx());
+        self.persist_session_if_changed(ui.ctx());
 
         self.icon_cache = Some(icon_cache);
+    }
+
+    /// Runs on every graceful exit (title-bar close, Exit menu, an external
+    /// WM_CLOSE, the UI probe's `quit`), before the window state is dropped.
+    fn on_exit(&mut self) {
+        self.flush_session();
     }
 
     #[cfg(feature = "ui-probe")]

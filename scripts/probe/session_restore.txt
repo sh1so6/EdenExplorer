@@ -1,0 +1,20 @@
+# Session restore. Run with -Seed scripts/probe/seed_session (3 tabs:
+# C:\Windows split with C:\Windows\System32 (split side focused), This PC,
+# and a folder that does not exist; the first tab is active).
+size 1117 717
+wait_ms 1500
+shot out/session_restore_0_split.png
+# Next tab: This PC.
+key Tab ctrl
+wait_ms 800
+shot out/session_restore_1_mypc.png
+# Next tab: the missing folder loads as an empty, usable view.
+key Tab ctrl
+wait_ms 800
+shot out/session_restore_2_missing.png
+# It can still navigate: Alt+Up goes to its (also missing) parent. On quit
+# the session lists C:\EdenProbeMissing as the active third tab.
+key ArrowUp alt
+wait_ms 800
+shot out/session_restore_3_missing_up.png
+quit

@@ -61,6 +61,13 @@ pub struct AppSettings {
     /// Persisted separately in `layout.json` (not part of the postcard settings snapshot).
     pub vertical_tabs: bool,
     pub vertical_tabs_width: f32,
+    /// Reopen the last session's tabs on startup. Persisted in `layout.json`.
+    #[serde(default = "default_restore_tabs_on_startup")]
+    pub restore_tabs_on_startup: bool,
+}
+
+fn default_restore_tabs_on_startup() -> bool {
+    true
 }
 
 #[derive(Default)]

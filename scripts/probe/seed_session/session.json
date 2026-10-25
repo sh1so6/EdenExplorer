@@ -1,0 +1,21 @@
+{
+  "version": 1,
+  "tabs": [
+    {
+      "primary": "C:\\Windows",
+      "split": "C:\\Windows\\System32",
+      "focused_secondary": true
+    },
+    {
+      "primary": "::MY_PC::",
+      "split": null,
+      "focused_secondary": false
+    },
+    {
+      "primary": "C:\\EdenProbeMissing\\DoesNotExist",
+      "split": null,
+      "focused_secondary": false
+    }
+  ],
+  "active_tab": 0
+}

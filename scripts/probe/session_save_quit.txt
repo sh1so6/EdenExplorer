@@ -1,0 +1,13 @@
+# Session save on a graceful exit. Run without a seed and with a fixed
+# -DataDir, then read <DataDir>\session.json: it must list This PC and
+# C:\Windows (active). The script quits right after the last change, before
+# the 1 s delayed write, so the file comes from the exit flush (on_exit).
+size 1117 717
+wait_ms 800
+key T ctrl
+wait_ms 300
+key D alt
+text C:\Windows
+shot out/session_save_quit_0_typed.png
+key Enter
+quit

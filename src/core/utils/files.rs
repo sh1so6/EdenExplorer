@@ -577,7 +577,7 @@ pub fn selection_paths_after_paste(
 /// Case-insensitive comparison key for a Windows path: `/` becomes `\`,
 /// repeated and trailing separators are dropped and a verbatim `\\?\`
 /// prefix is removed. Pure string work (no file system or network access).
-fn path_compare_key(path: &Path) -> String {
+pub(crate) fn path_compare_key(path: &Path) -> String {
     let raw = path.to_string_lossy();
     let mut text: &str = &raw;
     let mut key = String::with_capacity(text.len());

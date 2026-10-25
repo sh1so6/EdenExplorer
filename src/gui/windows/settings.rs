@@ -293,6 +293,7 @@ impl Default for AppSettings {
             directory_settings: vec![],
             vertical_tabs: false,
             vertical_tabs_width: crate::gui::windows::containers::tabs::VERTICAL_TABS_DEFAULT_WIDTH,
+            restore_tabs_on_startup: true,
         }
     }
 }
@@ -813,6 +814,21 @@ fn draw_general_tab(
         });
     });
     ui.group(|ui| {
+        // Restore the last session's tabs (the startup directory is used
+        // when this is off or there is no saved session).
+        ui.horizontal(|ui| {
+            if setting_checkbox(
+                ui,
+                palette,
+                &mut settings.current_settings.restore_tabs_on_startup,
+                RichText::new(i18n.tr("settings_restore_tabs")).color(palette.text_normal),
+                "settings_restore_tabs",
+            ) {
+                action = Some(SettingsAction::ApplySettings);
+            }
+            info_icon(ui, &i18n.tr("tooltip_settings_restore_tabs"), palette);
+        });
+        ui.add_space(8.0);
         // Starting Path
         setting_row(
             ui,

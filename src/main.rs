@@ -95,6 +95,7 @@ fn main() -> eframe::Result<()> {
 
             Ok(Box::new(gui::MainWindow::new_with_paths(
                 launch_paths.clone(),
+                launch_options.new_window,
             )))
         }),
     )

@@ -45,7 +45,11 @@ optionally `EDEN_PROBE_DATA_DIR=<dir>`. Without `EDEN_PROBE_SCRIPT` a
 ## What probe mode changes
 
 - Data files (`settings.bin`, `theme.bin`, `tags.bin`, `layout.json`,
-  `sidebar.json`, `favorites\`) live directly in the probe data dir.
+  `sidebar.json`, `session.json`, `favorites\`) live directly in the probe
+  data dir. Without a seeded `session.json` the probe starts with the default
+  tab as before; seed one (see `probe/seed_session`) to test tab restore. The
+  probe writes `session.json` there like a normal run (read it after the run
+  with a fixed `-DataDir`, e.g. `probe/session_save_quit.txt`).
 - No single-instance mutex and no path forwarding. The window title is
   `EdenExplorer Probe`, so a normal instance's forwarding
   (`FindWindowW("EdenExplorer")`) never targets it.
