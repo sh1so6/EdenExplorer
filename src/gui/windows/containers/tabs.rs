@@ -41,6 +41,76 @@ const VERTICAL_TABS_RAIL_TINT: f32 = 0.04;
 /// Keeps the floating scroll bar (and its hit area) off the right divider, whose resize
 /// handle reaches 3px into the rail, and away from the active row's opening.
 const VERTICAL_TABS_SCROLLBAR_MARGIN: f32 = 4.0;
+/// Opacity of the row being dragged to a new position in the vertical rail.
+const VERTICAL_TAB_REORDER_SOURCE_OPACITY: f32 = 0.4;
+/// Thickness of the insertion line shown while reordering vertical tabs.
+const VERTICAL_TAB_REORDER_LINE_WIDTH: f32 = 2.0;
+/// Fastest auto-scroll of the rail while a dragged tab sits at (or past) its top or bottom
+/// edge, in points per second.
+const VERTICAL_TAB_REORDER_SCROLL_SPEED: f32 = 600.0;
+
+/// Egui temp-memory key holding the id of the tab being dragged to a new position in the
+/// vertical rail. Absent when no reorder drag is in progress.
+fn vertical_tab_reorder_key() -> egui::Id {
+    egui::Id::new("eden_vertical_tab_reorder_drag")
+}
+
+/// Insertion slot (`0..=row_rects.len()`, in the current tab order) for a dragged tab whose
+/// pointer is at `pointer_y`: before the first row whose vertical midpoint lies below it.
+fn reorder_insert_slot(pointer_y: f32, row_rects: &[egui::Rect]) -> usize {
+    row_rects
+        .iter()
+        .position(|rect| pointer_y < rect.center().y)
+        .unwrap_or(row_rects.len())
+}
+
+/// Final index of an item moved from `from` into insertion slot `to` (`0..=len`, counted in
+/// the order before the move). `None` when the move would not change the order (dropping
+/// right above or right below itself) or the indices are out of range.
+pub fn reorder_index(from: usize, to: usize, len: usize) -> Option<usize> {
+    if from >= len || to > len || to == from || to == from + 1 {
+        return None;
+    }
+    Some(if to > from { to - 1 } else { to })
+}
+
+/// The pinned paths reordered to follow the tab order: the slots of pinned paths that are
+/// open in `tab_paths` are refilled with those paths in tab order, pinned paths without an
+/// open tab keep their slots. `None` when the order would not change (or the pinned list
+/// holds duplicates of an open path, which has no well-defined order).
+pub fn pinned_paths_in_tab_order(
+    pinned: &[PathBuf],
+    tab_paths: &[&std::path::Path],
+) -> Option<Vec<PathBuf>> {
+    let mut open_in_tab_order: Vec<&std::path::Path> = Vec::new();
+    for path in tab_paths {
+        if pinned.iter().any(|p| p == path) && !open_in_tab_order.contains(path) {
+            open_in_tab_order.push(path);
+        }
+    }
+    let open_slots = pinned
+        .iter()
+        .filter(|p| open_in_tab_order.contains(&p.as_path()))
+        .count();
+    if open_slots != open_in_tab_order.len() {
+        return None;
+    }
+    let mut next_open = open_in_tab_order.into_iter();
+    let reordered: Vec<PathBuf> = pinned
+        .iter()
+        .map(|p| {
+            if tab_paths.contains(&p.as_path()) {
+                next_open
+                    .next()
+                    .map(PathBuf::from)
+                    .unwrap_or_else(|| p.clone())
+            } else {
+                p.clone()
+            }
+        })
+        .collect();
+    (reordered != pinned).then_some(reordered)
+}
 
 /// Pointer/drag state shared by the horizontal and vertical tab strips to decide
 /// whether dragged files are hovering a tab and should be dropped into its folder.
@@ -383,7 +453,30 @@ pub fn draw_vertical_tabs(
     row_height: f32,
 ) -> TabsAction {
     let mut action = TabsAction::default();
-    let drop_ctx = TabDropContext::new(ui, drag_active, drag_hover_target.as_ref());
+
+    // Tab reordering: the dragged tab's id lives in temp memory from the drag start until
+    // release or Escape.
+    let reorder_key = vertical_tab_reorder_key();
+    let mut reorder_drag: Option<u64> = ui.data(|d| d.get_temp(reorder_key));
+    if let Some(id) = reorder_drag {
+        let cancelled = !tabs.iter().any(|tab| tab.id == id)
+            || ui.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::Escape));
+        if cancelled {
+            reorder_drag = None;
+            ui.data_mut(|d| d.remove::<u64>(reorder_key));
+            ui.ctx().stop_dragging();
+        }
+    }
+    let mut reorder_released = false;
+    // Only filled while reordering (allocation-free otherwise).
+    let mut row_rects: Vec<egui::Rect> = Vec::new();
+
+    // A tab reorder and a file drag never overlap: no drop highlight while reordering.
+    let drop_ctx = TabDropContext::new(
+        ui,
+        drag_active && reorder_drag.is_none(),
+        drag_hover_target.as_ref(),
+    );
     let row_height = vertical_tab_row_height(row_height, palette);
     let mut tab_drop_target: Option<PathBuf> = None;
 
@@ -429,13 +522,46 @@ pub fn draw_vertical_tabs(
             egui::ScrollArea::vertical()
                 .id_salt("vertical_tabs_scroll")
                 .auto_shrink([false, false])
+                // Dragging a row reorders tabs; it must never scroll the list.
+                .scroll_source(egui::scroll_area::ScrollSource {
+                    drag: egui::scroll_area::DragScroll::Never,
+                    ..Default::default()
+                })
                 .show(ui, |ui| {
                     ui.spacing_mut().item_spacing.y = 2.0;
+                    let collect_rects = reorder_drag.is_some();
+                    if collect_rects {
+                        row_rects.reserve(tabs.len());
+                    }
                     for (index, tab) in tabs.iter().enumerate() {
-                        let (rect, resp) = ui.allocate_exact_size(
-                            egui::vec2(ui.available_width(), row_height),
-                            egui::Sense::click(),
+                        // Stable per-tab ids keep the drag (and an open context menu) on
+                        // the same tab even if rows shift.
+                        let (_, rect) =
+                            ui.allocate_space(egui::vec2(ui.available_width(), row_height));
+                        let resp = ui.interact(
+                            rect,
+                            ui.id().with(("vertical_tab_row", tab.id)),
+                            egui::Sense::click_and_drag(),
                         );
+                        if collect_rects {
+                            row_rects.push(rect);
+                        }
+
+                        if reorder_drag.is_none()
+                            && !drag_active
+                            && resp.drag_started_by(egui::PointerButton::Primary)
+                        {
+                            reorder_drag = Some(tab.id);
+                            ui.data_mut(|d| d.insert_temp(reorder_key, tab.id));
+                        } else if reorder_drag == Some(tab.id) {
+                            if resp.drag_stopped() {
+                                reorder_released = true;
+                            } else if !resp.dragged() {
+                                // The drag ended elsewhere (e.g. `stop_dragging`).
+                                reorder_drag = None;
+                                ui.data_mut(|d| d.remove::<u64>(reorder_key));
+                            }
+                        }
 
                         if Some(tab.id) == scroll_to_id {
                             resp.scroll_to_me(Some(egui::Align::Center));
@@ -460,6 +586,21 @@ pub fn draw_vertical_tabs(
                             resp,
                             active_id,
                             drop_hovered,
+                            reorder_drag,
+                            palette,
+                            &mut action,
+                        );
+                    }
+
+                    if let Some(dragged_id) = reorder_drag
+                        && collect_rects
+                    {
+                        handle_vertical_tab_reorder_drag(
+                            ui,
+                            dragged_id,
+                            &row_rects,
+                            panel_rect.x_range(),
+                            reorder_released,
                             palette,
                             &mut action,
                         );
@@ -467,6 +608,14 @@ pub fn draw_vertical_tabs(
                 });
         },
     );
+
+    if reorder_drag.is_some() {
+        if reorder_released {
+            ui.data_mut(|d| d.remove::<u64>(reorder_key));
+        } else {
+            ui.ctx().set_cursor_icon(egui::CursorIcon::Grabbing);
+        }
+    }
 
     // Divider towards the content, open where the active row joins the content area.
     let divider_x = panel_rect.right() - 0.5;
@@ -490,6 +639,83 @@ pub fn draw_vertical_tabs(
 
     action.move_files_to_tab_dir = tab_drop_target;
     action
+}
+
+/// Per-frame work of a vertical tab reorder drag, run inside the rail's `ScrollArea` after
+/// all rows are laid out (`row_rects`, one per tab in order): on `released` it emits
+/// `action.reorder`, otherwise it draws the insertion line and auto-scrolls near the edges.
+///
+/// Only the pointer's height picks the slot, clamped to the visible part of the list so a
+/// drop never lands among scrolled-out rows. With the pointer left or right of the rail
+/// (`rail_x`) there is no insertion line and releasing cancels the move.
+fn handle_vertical_tab_reorder_drag(
+    ui: &egui::Ui,
+    dragged_id: u64,
+    row_rects: &[egui::Rect],
+    rail_x: egui::Rangef,
+    released: bool,
+    palette: &ThemePalette,
+    action: &mut TabsAction,
+) {
+    let (Some(first), Some(last)) = (row_rects.first(), row_rects.last()) else {
+        return;
+    };
+    let Some(pointer) = ui.input(|i| i.pointer.interact_pos()) else {
+        return;
+    };
+    if !rail_x.contains(pointer.x) {
+        return;
+    }
+    let viewport = ui.clip_rect();
+    let slot = reorder_insert_slot(
+        pointer.y.clamp(viewport.top(), viewport.bottom()),
+        row_rects,
+    );
+    if released {
+        action.reorder = Some((dragged_id, slot));
+        return;
+    }
+
+    // Insertion line, centered in the gap between the rows around the slot.
+    let half_gap = ui.spacing().item_spacing.y * 0.5;
+    let line_y = if slot == 0 {
+        first.top() - half_gap
+    } else if slot == row_rects.len() {
+        last.bottom() + half_gap
+    } else {
+        (row_rects[slot - 1].bottom() + row_rects[slot].top()) * 0.5
+    };
+    let half_line = VERTICAL_TAB_REORDER_LINE_WIDTH * 0.5;
+    let line_y = line_y.clamp(viewport.top() + half_line, viewport.bottom() - half_line);
+    let line_rect = egui::Rect::from_x_y_ranges(
+        first.left()..=first.right() - VERTICAL_TABS_INSET,
+        line_y - half_line..=line_y + half_line,
+    );
+    ui.painter()
+        .rect_filled(line_rect, egui::CornerRadius::same(1), palette.primary);
+
+    // Auto-scroll while the pointer is within one row of (or beyond) the top/bottom edge,
+    // faster the closer it gets. Only when there is something left to scroll to, so a list
+    // that fits does not repaint continuously.
+    let zone = first.height().min(viewport.height() * 0.25).max(1.0);
+    let top_depth = ((viewport.top() + zone - pointer.y) / zone).min(1.0);
+    let bottom_depth = ((pointer.y - (viewport.bottom() - zone)) / zone).min(1.0);
+    let speed = VERTICAL_TAB_REORDER_SCROLL_SPEED * ui.input(|i| i.stable_dt).min(0.1);
+    // Positive deltas move the content down, revealing the rows above.
+    let delta = if top_depth > 0.0 && first.top() < viewport.top() - 0.5 {
+        speed * top_depth
+    } else if bottom_depth > 0.0 && last.bottom() > viewport.bottom() + 0.5 {
+        -speed * bottom_depth
+    } else {
+        0.0
+    };
+    if delta != 0.0 {
+        ui.scroll_with_delta_animation(
+            egui::vec2(0.0, delta),
+            egui::style::ScrollAnimation::none(),
+        );
+        ui.ctx().request_repaint();
+    }
 }
 
 fn handle_draw_vertical_new_tab_button(
@@ -552,6 +778,7 @@ fn handle_draw_vertical_tab_row(
     resp: egui::Response,
     active_id: u64,
     drop_hovered: bool,
+    reorder_drag: Option<u64>,
     palette: &ThemePalette,
     action: &mut TabsAction,
 ) {
@@ -562,9 +789,11 @@ fn handle_draw_vertical_tab_row(
     // background runs into it.
     let item_rect = rect.with_max_x(rect.right() - VERTICAL_TABS_INSET);
     // Includes hovering the pin button, which sits on top of the row response. A row whose
-    // context menu is open stays highlighted.
-    let row_hovered = ui.rect_contains_pointer(rect)
-        || egui::Popup::is_id_open(ui.ctx(), egui::Popup::default_response_id(&resp));
+    // context menu is open stays highlighted. While a tab is being reordered only the
+    // insertion line marks the pointer.
+    let row_hovered = reorder_drag.is_none()
+        && (ui.rect_contains_pointer(rect)
+            || egui::Popup::is_id_open(ui.ctx(), egui::Popup::default_response_id(&resp)));
 
     let font_id = FontId::new(palette.text_size, FontFamily::Proportional);
     let icon_font_id = FontId::new(palette.tab_icon_size, FontFamily::Proportional);
@@ -603,7 +832,7 @@ fn handle_draw_vertical_tab_row(
                 .size(palette.tooltip_text_size)
                 .color(palette.tooltip_text_color),
         );
-    let icon_glyph = tab_icon_glyph(tab.is_pinned, icon_resp.hovered());
+    let icon_glyph = tab_icon_glyph(tab.is_pinned, icon_resp.hovered() && reorder_drag.is_none());
 
     let icon_glyph_width = ui
         .painter()
@@ -619,7 +848,10 @@ fn handle_draw_vertical_tab_row(
     let (display_title, truncated) =
         truncate_item_text(ui, &tab.title, text_width, &font_id, label_color);
 
-    let painter = ui.painter();
+    let mut painter = ui.painter().clone();
+    if reorder_drag == Some(tab.id) {
+        painter.multiply_opacity(VERTICAL_TAB_REORDER_SOURCE_OPACITY);
+    }
     if is_active {
         // Tab shape on the content background, open towards the content: rounded on the
         // left, top/bottom edges running into the divider, no right edge.
@@ -1225,6 +1457,75 @@ fn tab_nav_button(
 mod tests {
     use super::*;
     use crate::gui::theme::{ThemeMode, get_default_palette};
+
+    #[test]
+    fn reorder_index_maps_slots_to_final_positions() {
+        // Dropping right above or below itself is a no-op.
+        assert_eq!(reorder_index(2, 2, 5), None);
+        assert_eq!(reorder_index(2, 3, 5), None);
+        // Moving up lands at the slot.
+        assert_eq!(reorder_index(2, 0, 5), Some(0));
+        assert_eq!(reorder_index(4, 1, 5), Some(1));
+        // Moving down lands one before the slot (the tab left its old place).
+        assert_eq!(reorder_index(0, 2, 5), Some(1));
+        assert_eq!(reorder_index(0, 5, 5), Some(4));
+        assert_eq!(reorder_index(1, 4, 5), Some(3));
+        // Out of range.
+        assert_eq!(reorder_index(5, 0, 5), None);
+        assert_eq!(reorder_index(0, 6, 5), None);
+        assert_eq!(reorder_index(0, 0, 1), None);
+        assert_eq!(reorder_index(0, 1, 1), None);
+    }
+
+    #[test]
+    fn reorder_insert_slot_uses_row_midpoints() {
+        let rows: Vec<egui::Rect> = (0..3)
+            .map(|i| {
+                let top = i as f32 * 26.0;
+                egui::Rect::from_min_max(egui::pos2(0.0, top), egui::pos2(100.0, top + 24.0))
+            })
+            .collect();
+        assert_eq!(reorder_insert_slot(-50.0, &rows), 0);
+        assert_eq!(reorder_insert_slot(11.0, &rows), 0);
+        assert_eq!(reorder_insert_slot(13.0, &rows), 1);
+        assert_eq!(reorder_insert_slot(40.0, &rows), 2);
+        assert_eq!(reorder_insert_slot(70.0, &rows), 3);
+        assert_eq!(reorder_insert_slot(500.0, &rows), 3);
+        assert_eq!(reorder_insert_slot(0.0, &[]), 0);
+    }
+
+    #[test]
+    fn pinned_paths_follow_the_tab_order() {
+        let p = |s: &str| PathBuf::from(s);
+        let pinned = vec![p("A"), p("X"), p("B"), p("C")];
+        let tabs = [p("C"), p("T"), p("B"), p("A")];
+        let tab_paths: Vec<&std::path::Path> = tabs.iter().map(|t| t.as_path()).collect();
+        // X has no open tab and keeps its slot; the open ones follow the tab order.
+        assert_eq!(
+            pinned_paths_in_tab_order(&pinned, &tab_paths),
+            Some(vec![p("C"), p("X"), p("B"), p("A")])
+        );
+
+        // Already in tab order: no change, so nothing is saved.
+        let in_order = vec![p("A"), p("X"), p("B")];
+        let tabs = [p("A"), p("B"), p("T")];
+        let tab_paths: Vec<&std::path::Path> = tabs.iter().map(|t| t.as_path()).collect();
+        assert_eq!(pinned_paths_in_tab_order(&in_order, &tab_paths), None);
+
+        // Duplicate tabs of a pinned path count once, at the first one.
+        let pinned = vec![p("A"), p("B")];
+        let tabs = [p("B"), p("A"), p("B")];
+        let tab_paths: Vec<&std::path::Path> = tabs.iter().map(|t| t.as_path()).collect();
+        assert_eq!(
+            pinned_paths_in_tab_order(&pinned, &tab_paths),
+            Some(vec![p("B"), p("A")])
+        );
+
+        // No pins, or a duplicated pin of an open path: left alone.
+        assert_eq!(pinned_paths_in_tab_order(&[], &tab_paths), None);
+        let dup = vec![p("B"), p("A"), p("B")];
+        assert_eq!(pinned_paths_in_tab_order(&dup, &tab_paths), None);
+    }
 
     #[test]
     fn vertical_tab_row_height_is_bounded_and_fits_the_text() {

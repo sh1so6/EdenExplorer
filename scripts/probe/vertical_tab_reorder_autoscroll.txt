@@ -1,0 +1,20 @@
+# Auto-scroll while dragging a vertical tab to the rail's edge. Run with
+# -Seed scripts/probe/seed_vertical_tab_rows; the short window leaves room for
+# only a few of the 8 rows (centered at y = 76 + 26 * i).
+size 1000 240
+wait_ms 1500
+shot out/vtreorder_as_0_start.png
+# Hold Windows (row 0) at the bottom edge: the list scrolls down to its end.
+move 380 76
+down
+move 380 100
+move 380 150
+move 380 200
+move 380 236
+wait_ms 1200
+shot out/vtreorder_as_1_scrolled_to_end.png
+# Drop at the very end.
+up
+wait_ms 300
+shot out/vtreorder_as_2_dropped_last.png
+quit

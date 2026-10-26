@@ -1,0 +1,79 @@
+# Drag to reorder vertical tabs. Run with -Seed scripts/probe/seed_vertical_tab_rows
+# and a fixed -DataDir, then read <DataDir>\session.json. Seeded order:
+#   0 Windows, 1 This PC, 2 System32 (active), 3 Fonts, 4 Program Files, 5 etc,
+#   6 Users, 7 Wallpaper.
+# Rows (24 px, 2 px gap) are centered at y = 76 + 26 * i; the tab icon (pin button)
+# sits at x = 281, the row text around x = 380. The rail ends left of x = 500.
+# Expected session.json at the end:
+#   Wallpaper, This PC, System32, Fonts, Program Files, Windows, etc, Users
+#   with active_tab = 4 (Program Files, activated by the final plain click).
+size 1200 800
+wait_ms 1500
+shot out/vtreorder_0_start.png
+
+# 1) Drag Windows (row 0) down between Program Files and etc (slot 5).
+move 380 76
+down
+move 380 80
+move 380 100
+move 380 130
+move 380 160
+move 380 190
+move 380 194
+wait_ms 300
+shot out/vtreorder_1_mid_drag_down.png
+up
+wait_ms 300
+# This PC, System32 (still active), Fonts, Program Files, Windows, etc, Users, Wallpaper
+shot out/vtreorder_2_after_drag_down.png
+
+# 2) Drag Wallpaper (row 7) up to the top, starting on its tab icon (pin button):
+#    moves the row, does not pin it.
+move 281 258
+down
+move 281 250
+move 281 200
+move 281 140
+move 281 90
+move 281 70
+wait_ms 300
+shot out/vtreorder_3_mid_drag_up_from_icon.png
+up
+wait_ms 300
+# Wallpaper, This PC, System32 (active), Fonts, Program Files, Windows, etc, Users
+shot out/vtreorder_4_after_drag_up.png
+
+# 3) Escape cancels: drag Fonts (row 3) down, press Escape, then release.
+move 380 154
+down
+move 380 170
+move 380 200
+move 380 240
+wait_ms 300
+shot out/vtreorder_5_mid_drag_before_escape.png
+key Escape
+wait_ms 300
+shot out/vtreorder_6_after_escape_still_down.png
+move 380 250
+up
+wait_ms 300
+# Unchanged and nothing activated.
+shot out/vtreorder_7_after_escape_release.png
+
+# 4) Releasing beside the rail cancels (no insertion line out there).
+move 380 102
+down
+move 400 140
+move 600 200
+move 700 240
+wait_ms 300
+shot out/vtreorder_8_outside_rail.png
+up
+wait_ms 300
+shot out/vtreorder_9_after_outside_release.png
+
+# 5) A plain click still activates (Program Files, row 4).
+click 380 180
+wait_ms 500
+shot out/vtreorder_10_click_activates.png
+quit

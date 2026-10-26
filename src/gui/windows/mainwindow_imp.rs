@@ -34,6 +34,7 @@ use crate::gui::windows::containers::structs::{
     ItemViewerFolderSizeState, ItemViewerNavBarAction, RenameState, SidebarAction, SplitSide,
     TabContextAction, TabState, TabView, TabsAction, TopbarAction,
 };
+use crate::gui::windows::containers::tabs::{pinned_paths_in_tab_order, reorder_index};
 use crate::gui::windows::customizetheme::draw_theme_customizer;
 use crate::gui::windows::enums::{SettingsAction, ThemeCustomizerAction};
 use crate::gui::windows::settings::draw_settings_window;
@@ -1946,6 +1947,9 @@ impl MainWindow {
             if let Some(context) = action.context {
                 self.handle_tab_context_action(context);
             }
+            if let Some((id, slot)) = action.reorder {
+                self.reorder_tab(id, slot);
+            }
             if let Some(target_dir) = action.move_files_to_tab_dir.as_ref() {
                 if let Some(sources) = drag_sources {
                     self.move_selected_paths_to_dir(sources, target_dir.clone());
@@ -2057,6 +2061,43 @@ impl MainWindow {
                 ..Default::default()
             };
             self.handle_tabs_action_inner(Some(action), None);
+        }
+    }
+
+    /// Moves tab `id` into insertion slot `slot` (counted in the order before the move, as
+    /// emitted by the vertical rail's drag). The active tab stays active and no view reloads.
+    /// The pinned list is re-sorted to follow the new tab order, since startup without a
+    /// session opens the pinned tabs in that order.
+    fn reorder_tab(&mut self, id: u64, slot: usize) {
+        let Some(from) = self.tabs.iter().position(|tab| tab.id == id) else {
+            return;
+        };
+        let Some(to) = reorder_index(from, slot, self.tabs.len()) else {
+            return;
+        };
+        let active_id = self.active_tab().id;
+        let tab = self.tabs.remove(from);
+        self.tabs.insert(to, tab);
+        if let Some(pos) = self.tabs.iter().position(|tab| tab.id == active_id) {
+            self.active_tab = pos;
+        }
+        self.pending_tab_scroll_id = Some(id);
+        self.mark_tab_infos_dirty();
+
+        let reordered_pins = {
+            let tab_paths: Vec<&Path> = self
+                .tabs
+                .iter()
+                .map(|tab| tab.primary_view.nav.current.as_path())
+                .collect();
+            pinned_paths_in_tab_order(
+                &self.settings_window.current_settings.pinned_tabs,
+                &tab_paths,
+            )
+        };
+        if let Some(pinned) = reordered_pins {
+            self.settings_window.current_settings.pinned_tabs = pinned;
+            self.save_app_settings_to_disk();
         }
     }
 

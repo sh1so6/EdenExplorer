@@ -94,6 +94,9 @@ pub struct TabsAction {
     pub open_new: bool,
     pub toggle_pin: Option<PathBuf>,
     pub move_files_to_tab_dir: Option<PathBuf>,
+    /// A tab dragged in the vertical rail: `(tab id, insertion slot)`, the slot counted in
+    /// the tab order before the move (`0..=tabs.len()`, see `tabs::reorder_index`).
+    pub reorder: Option<(u64, usize)>,
     pub scroll_left: bool,
     pub scroll_right: bool,
     pub max_scroll_offset: f32,
