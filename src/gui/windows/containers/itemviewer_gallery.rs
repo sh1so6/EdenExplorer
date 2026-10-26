@@ -226,7 +226,10 @@ pub fn draw_gallery_view(
                             }
                         }
 
-                        if response.drag_started() && !is_raw_physical_drive_path(&file.path) {
+                        // Primary button only (see the details view).
+                        if response.drag_started_by(egui::PointerButton::Primary)
+                            && !is_raw_physical_drive_path(&file.path)
+                        {
                             drag_state.start_pos = response.interact_pointer_pos();
                             drag_state.active = false;
                             drag_state.source_items.clear();
@@ -245,7 +248,9 @@ pub fn draw_gallery_view(
 
                         if let (Some(start), Some(current)) = (
                             drag_state.start_pos,
-                            response.ctx.input(|i| i.pointer.hover_pos()),
+                            response.ctx.input(|i| {
+                                i.pointer.hover_pos().filter(|_| i.pointer.primary_down())
+                            }),
                         ) {
                             if !drag_state.active
                                 && !drag_state.source_items.is_empty()

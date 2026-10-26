@@ -128,6 +128,8 @@ pub struct TabView {
     pub thumbnail_service: ThumbnailService,
     pub files: Vec<FileItem>,
     pub drag_state: DragState,
+    /// Directory of the last `load_view`, to tell navigation from a refresh.
+    pub loaded_dir: Option<PathBuf>,
     pub is_loading: bool,
     pub rx: Option<Receiver<FileItem>>,
     pub size_req_tx: Option<Sender<PathBuf>>,
@@ -165,6 +167,7 @@ impl TabView {
             thumbnail_service: ThumbnailService::default(),
             files: Vec::new(),
             drag_state: DragState::default(),
+            loaded_dir: None,
             is_loading: false,
             rx: None,
             size_req_tx: None,

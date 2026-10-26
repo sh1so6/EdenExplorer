@@ -838,6 +838,14 @@ impl MainWindow {
 
         {
             let view = self.active_tab_mut().view_mut(side);
+            // Navigating to another folder ends any drag of this view (its source
+            // rows are gone). A refresh of the same folder keeps it.
+            if view.loaded_dir.as_ref() != Some(&current_path) {
+                view.drag_state.active = false;
+                view.drag_state.start_pos = None;
+                view.drag_state.source_items.clear();
+                view.loaded_dir = Some(current_path.clone());
+            }
             apply_directory_settings_to_view(view, &current_settings);
             view.files.clear();
             view.rx = None;

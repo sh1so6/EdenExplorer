@@ -68,6 +68,14 @@ pub fn draw_item_viewer(
     let column_state = &mut view.column_state;
     let filter_state = &mut view.item_viewer_filter_state;
     let drag_state = &mut view.drag_state;
+    // A pending drag (pressed on a row, 4px threshold not passed yet) only
+    // lives while the primary button is held. The main window's release
+    // handling only clears active drags, so drop a stale pending one here;
+    // otherwise a later mouse move could still turn it into a drag.
+    if !drag_state.active && !ui.input(|i| i.pointer.primary_down()) {
+        drag_state.start_pos = None;
+        drag_state.source_items.clear();
+    }
     let explorer_state = &mut view.explorer_state;
     let current_dir = view.nav.current.clone();
     let is_loading = view.is_loading;
@@ -533,7 +541,13 @@ pub fn draw_item_viewer(
                             }
                         }
 
-                        if row_resp.drag_started() && !is_non_ntfs_drive {
+                        // Only a primary-button drag moves items: `drag_started()`
+                        // also fires for other buttons (e.g. Back/X1 held while
+                        // navigating). A long primary press stays pending until
+                        // the 4px threshold and is dropped on release.
+                        if row_resp.drag_started_by(egui::PointerButton::Primary)
+                            && !is_non_ntfs_drive
+                        {
                             drag_state.start_pos = row_resp.interact_pointer_pos();
                             drag_state.active = false; // threshold not passed yet
                             drag_state.source_items.clear();
@@ -551,9 +565,13 @@ pub fn draw_item_viewer(
                             }
                         }
 
+                        // Promote to an active drag only while the primary button
+                        // is still held, never on a later plain mouse move.
                         if let (Some(start), Some(current)) = (
                             drag_state.start_pos,
-                            row_resp.ctx.input(|i| i.pointer.hover_pos()),
+                            row_resp.ctx.input(|i| {
+                                i.pointer.hover_pos().filter(|_| i.pointer.primary_down())
+                            }),
                         ) {
                             if !drag_state.active
                                 && !drag_state.source_items.is_empty()
