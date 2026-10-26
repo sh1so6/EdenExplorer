@@ -165,6 +165,7 @@ theme_import = 导入主题
 tags = 标签
 tag_manage = 管理标签
 tag_show_in_panel = 在标签面板中显示
+tag_open_in_current_tab = 在当前标签页中打开
 tag_sidebar_hint = 点击在标签面板中显示。将项目拖放到此处可添加此标签。
 tag_empty_state = 尚无标签。请从资源管理器使用管理标签。
 tag_empty_group = 尚无使用此标签的对象

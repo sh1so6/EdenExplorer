@@ -165,6 +165,7 @@ theme_import = 匯入主題
 tags = 標籤
 tag_manage = 管理標籤
 tag_show_in_panel = 在標籤面板中顯示
+tag_open_in_current_tab = 在目前分頁中開啟
 tag_sidebar_hint = 按一下即可在標籤面板中顯示。將項目拖放至此即可加上此標籤。
 tag_empty_state = 尚無標籤。請從檔案總管使用管理標籤。
 tag_empty_group = 尚無使用此標籤的物件

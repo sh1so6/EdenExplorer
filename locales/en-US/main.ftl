@@ -165,6 +165,7 @@ theme_import = Import Theme
 tags = Tags
 tag_manage = Manage Tags
 tag_show_in_panel = Show in tags panel
+tag_open_in_current_tab = Open in current tab
 tag_sidebar_hint = Click to show in the tags panel. Drop items here to add this tag.
 tag_empty_state = No tags yet. Use Manage Tags from the explorer.
 tag_empty_group = No objects with this tag yet

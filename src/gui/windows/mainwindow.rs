@@ -1650,10 +1650,22 @@ impl eframe::App for MainWindow {
             handle_pending_actions(secondary_pending_action, self);
         }
         self.focused_split = restore_focus;
-        // Tags dock item actions (open folder / file) apply to the focused pane.
+        // Tags dock item actions. A folder click opens (or activates) a tab,
+        // whatever the focused pane shows (even the recycle bin, where
+        // `handle_pending_actions` drops open actions), and focuses that
+        // tab's primary pane. The rest apply to the focused pane.
         if let Some(tags_action) = self.tags_state.pending_action.take() {
-            handle_pending_actions(Some(tags_action), self);
-            self.focused_split = restore_focus;
+            match tags_action {
+                ItemViewerAction::OpenInNewTab(path) => {
+                    if self.open_or_activate_tab(path) {
+                        self.load_active_tab_views();
+                    }
+                }
+                tags_action => {
+                    handle_pending_actions(Some(tags_action), self);
+                    self.focused_split = restore_focus;
+                }
+            }
         }
         if draw_tag_picker_popup(ui.ctx(), &self.i18n, &palette, &mut self.tags_state) {
             tags_changed = true;

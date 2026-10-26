@@ -165,6 +165,7 @@ theme_import = テーマをインポート
 tags = タグ
 tag_manage = タグを管理
 tag_show_in_panel = タグパネルで表示
+tag_open_in_current_tab = 現在のタブで開く
 tag_sidebar_hint = クリックでタグパネルに表示。項目をここにドロップするとこのタグを付けます。
 tag_empty_state = まだタグがありません。エクスプローラーから「タグを管理」を使用してください。
 tag_empty_group = このタグが付けられたオブジェクトはまだありません

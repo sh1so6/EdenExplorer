@@ -165,6 +165,7 @@ theme_import = Impor Tema
 tags = Tag
 tag_manage = Kelola Tag
 tag_show_in_panel = Tampilkan di panel tag
+tag_open_in_current_tab = Buka di tab saat ini
 tag_sidebar_hint = Klik untuk menampilkan di panel tag. Letakkan item di sini untuk menambahkan tag ini.
 tag_empty_state = Belum ada tag. Gunakan Kelola Tag dari explorer.
 tag_empty_group = Belum ada objek dengan tag ini

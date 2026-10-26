@@ -971,18 +971,14 @@ fn handle_context_menu_actions_tags(
 
     let context_paths = vec![file.path.clone()];
 
-    // --- NORMAL FILE VIEW ---
-    // Determine button label based on selection count
-    let label = i18n.tr("open_default_program");
-
-    // Check if all selected files are not directories
-    let all_files = context_paths.iter().all(|path| !path.is_dir());
-
-    // Add the button with dynamic label
-    if ui
-        .add_enabled(all_files, egui::Button::new(label))
-        .clicked()
-    {
+    if file.is_dir {
+        // A click opens the folder in a new tab; this navigates the focused
+        // pane instead.
+        if ui.button(i18n.tr("tag_open_in_current_tab")).clicked() {
+            *action = Some(ItemViewerAction::Open(file.path.clone()));
+            ui.close();
+        }
+    } else if ui.button(i18n.tr("open_default_program")).clicked() {
         *action = Some(ItemViewerAction::OpenWithDefault(context_paths.clone()));
         ui.close();
     }
@@ -1010,12 +1006,14 @@ fn handle_context_menu_actions_tags(
     }
 }
 
+/// A click on a tagged folder opens it in a new tab (or activates the tab
+/// already showing it); a file opens in its default program.
 fn handle_row_click(object: &FileItem) -> Option<ItemViewerAction> {
-    return Some(if object.is_dir {
-        ItemViewerAction::Open(object.path.clone())
+    Some(if object.is_dir {
+        ItemViewerAction::OpenInNewTab(object.path.clone())
     } else {
         ItemViewerAction::OpenWithDefault(vec![object.path.clone()])
-    });
+    })
 }
 
 #[cfg(test)]
