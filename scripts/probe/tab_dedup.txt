@@ -1,0 +1,41 @@
+# Opening a path that is already open activates its tab instead of a duplicate.
+# Run with -Seed scripts/probe/seed_vertical_tab_rows (8 tabs, System32 active,
+# This PC is the 2nd tab; rows at y = 76 + 26 * i).
+size 1200 800
+wait_ms 1500
+# Sidebar middle-click "This PC": activates the existing 2nd tab (8 tabs).
+click 68 80 middle
+move 700 600
+wait_ms 600
+shot out/tab_dedup_1_mypc.png
+# Sidebar middle-click "My User Home": not open yet -> new 9th tab.
+click 88 102 middle
+move 700 600
+wait_ms 600
+shot out/tab_dedup_2_home_new.png
+# Back to Fonts, middle-click home again: activates the 9th tab (still 9).
+click 320 154
+wait_ms 400
+click 88 102 middle
+move 700 600
+wait_ms 600
+shot out/tab_dedup_3_home_again.png
+# Users tab: middle-clicking the home folder row in the item viewer.
+click 320 232
+move 700 600
+wait_ms 800
+shot out/tab_dedup_4_users.png
+# Item viewer middle-click on the home folder row: activates the 9th tab.
+click 530 70 middle
+move 700 600
+wait_ms 600
+shot out/tab_dedup_5_row_home.png
+# Back to Users; middle-click Public: not open -> new 10th tab. session.json
+# (fixed -DataDir) then lists 10 tabs, Public active.
+click 320 232
+wait_ms 600
+click 530 150 middle
+move 700 600
+wait_ms 600
+shot out/tab_dedup_6_row_public.png
+quit

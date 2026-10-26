@@ -10,6 +10,7 @@ use crate::core::session::{
     SESSION_RETRY_DELAY, SESSION_VERSION, SessionSavePoll, SessionSnapshot, SessionTab,
     SessionTabKey, merge_launch_paths, save_session, session_path_for, session_signature,
 };
+use crate::core::utils::files::position_of_same_path;
 use crate::gui::MainWindow;
 use crate::gui::i18n::I18n;
 use crate::gui::theme::{
@@ -291,37 +292,71 @@ impl MainWindow {
         self.mark_tab_infos_dirty();
     }
 
+    /// Index of the tab whose primary view shows `path`. Split views are not
+    /// considered, like the launch-path merge after a session restore.
+    fn tab_index_for_path(&self, path: &Path) -> Option<usize> {
+        position_of_same_path(
+            self.tabs
+                .iter()
+                .map(|tab| tab.primary_view.nav.current.as_path()),
+            path,
+        )
+    }
+
+    /// Opens `path` in a new tab, or activates the tab already showing it
+    /// (primary view) instead of opening a duplicate. Nothing is loaded:
+    /// returns true when the active tab changed (or was created) and its
+    /// views must be loaded with [`Self::load_active_tab_views`].
+    pub fn open_or_activate_tab(&mut self, path: PathBuf) -> bool {
+        let Some(index) = self.tab_index_for_path(&path) else {
+            self.open_new_tab(path);
+            self.focused_split = SplitSide::Primary;
+            self.pending_tab_scroll_id = Some(self.active_tab().id);
+            return true;
+        };
+        self.focused_split = SplitSide::Primary;
+        self.pending_tab_scroll_id = Some(self.tabs[index].id);
+        if index == self.active_tab {
+            // Already showing it: no reload, only make sure it is visible.
+            return false;
+        }
+        self.active_tab = index;
+        let tab = self.active_tab_mut();
+        tab.primary_view.item_viewer_filter_state.dirty = true;
+        if let Some(split) = tab.split_view.as_mut() {
+            split.item_viewer_filter_state.dirty = true;
+        }
+        self.mark_tab_infos_dirty();
+        true
+    }
+
     pub fn open_startup_paths(&mut self, paths: &[PathBuf]) {
         let Some(first_path) = paths.first() else {
             return;
         };
 
-        let pinned_count = self.settings_window.current_settings.pinned_tabs.len();
-        if pinned_count == 0 {
+        // The first launch path becomes the active tab: it replaces the
+        // default tab when there are no pinned tabs, otherwise it opens as
+        // (or activates) a tab after them. Paths that are already open
+        // activate their tab instead of opening a duplicate.
+        let mut first_index = None;
+        let mut remaining = paths.iter();
+        if self.settings_window.current_settings.pinned_tabs.is_empty() {
             self.tabs[0].primary_view.nav = Navigation::new(first_path.clone());
             self.active_tab = 0;
-            self.focused_split = SplitSide::Primary;
-            self.load_path();
-        } else {
-            self.open_new_tab(first_path.clone());
-            self.load_path();
+            first_index = Some(0);
+            remaining.next();
+        }
+        for path in remaining {
+            self.open_or_activate_tab(path.clone());
+            first_index.get_or_insert(self.active_tab);
         }
 
-        for path in paths.iter().skip(1) {
-            self.open_new_tab(path.clone());
-        }
-
-        if pinned_count > 0 {
-            self.active_tab = pinned_count;
-            self.focused_split = SplitSide::Primary;
-            self.pending_tab_scroll_id = self.tabs.get(self.active_tab).map(|tab| tab.id);
-            self.load_path();
-        } else {
-            self.active_tab = 0;
-            self.focused_split = SplitSide::Primary;
-            self.pending_tab_scroll_id = self.tabs.first().map(|tab| tab.id);
-        }
+        self.active_tab = first_index.unwrap_or(0).min(self.tabs.len() - 1);
+        self.focused_split = SplitSide::Primary;
+        self.pending_tab_scroll_id = Some(self.active_tab().id);
         self.mark_tab_infos_dirty();
+        self.load_active_tab_views();
     }
 
     /// Replaces the startup tabs with the tabs of a saved session (ids 1..n,
@@ -2208,9 +2243,10 @@ impl MainWindow {
                 self.mark_tab_infos_dirty();
                 self.load_path();
             }
-            if let Some(path) = action.open_new_tab {
-                self.open_new_tab(path);
-                self.load_path();
+            if let Some(path) = action.open_new_tab
+                && self.open_or_activate_tab(path)
+            {
+                self.load_active_tab_views();
             }
             if let Some(path) = action.select_favorite {
                 self.sidebar_state.item_clicked = Some(path);
@@ -3196,8 +3232,9 @@ pub fn handle_pending_actions(pending_action: Option<ItemViewerAction>, explorer
                 // Further folder shortcuts in a multi-selection open in new
                 // tabs (Explorer opens one window each).
                 for (target, _) in folder_targets {
-                    explorer.open_new_tab(target);
-                    explorer.load_path();
+                    if explorer.open_or_activate_tab(target) {
+                        explorer.load_active_tab_views();
+                    }
                 }
 
                 for path in shell_paths {
@@ -3242,8 +3279,9 @@ pub fn handle_pending_actions(pending_action: Option<ItemViewerAction>, explorer
                 }
             }
             ItemViewerAction::OpenInNewTab(path) => {
-                explorer.open_new_tab(path);
-                explorer.load_path();
+                if explorer.open_or_activate_tab(path) {
+                    explorer.load_active_tab_views();
+                }
             }
             ItemViewerAction::OpenInSplitView(path) => {
                 explorer.open_path_in_split(path);

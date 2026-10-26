@@ -395,12 +395,13 @@ impl eframe::App for MainWindow {
         crate::gui::windows::text_input_focus::begin_frame(ui.ctx());
         self.sync_manual_window_size();
         {
-            let forwarded_paths = take_forwarded_paths();
-            for path in &forwarded_paths {
-                self.open_new_tab(path.clone());
+            // A forwarded path that is already open activates its tab.
+            let mut load_active = false;
+            for path in take_forwarded_paths() {
+                load_active |= self.open_or_activate_tab(path);
             }
-            if !forwarded_paths.is_empty() {
-                self.load_path();
+            if load_active {
+                self.load_active_tab_views();
             }
         }
         let palette = get_palette(self.theme);

@@ -621,6 +621,19 @@ pub(crate) fn path_compare_key(path: &Path) -> String {
     key
 }
 
+/// Index of the first entry of `paths` that names the same location as `path`,
+/// compared with [`path_compare_key`] (case, separators, trailing `\` and the
+/// `\\?\` prefix are ignored). Pure string work, O(paths).
+pub(crate) fn position_of_same_path<'a>(
+    paths: impl IntoIterator<Item = &'a Path>,
+    path: &Path,
+) -> Option<usize> {
+    let key = path_compare_key(path);
+    paths
+        .into_iter()
+        .position(|candidate| path_compare_key(candidate) == key)
+}
+
 /// Filters the sources of an internal move (drag & drop) against the target
 /// folder and returns only the sources whose move would change anything.
 ///
@@ -665,11 +678,23 @@ pub fn effective_move_sources(sources: &[PathBuf], target_dir: &Path) -> Vec<Pat
 
 #[cfg(test)]
 mod tests {
-    use super::{effective_move_sources, path_compare_key};
+    use super::{effective_move_sources, path_compare_key, position_of_same_path};
     use std::path::{Path, PathBuf};
 
     fn paths(items: &[&str]) -> Vec<PathBuf> {
         items.iter().map(PathBuf::from).collect()
+    }
+
+    #[test]
+    fn position_of_same_path_ignores_case_and_separators() {
+        let open = paths(&[r"C:\Windows", r"D:\", "::{20D04FE0-3AEA-1069-A2D8-08002B30309D}"]);
+        let find = |path: &str| position_of_same_path(open.iter().map(|p| p.as_path()), Path::new(path));
+        assert_eq!(find(r"c:\windows\"), Some(0));
+        assert_eq!(find(r"\\?\C:\Windows"), Some(0));
+        assert_eq!(find("d:"), Some(1));
+        assert_eq!(find("::{20D04FE0-3AEA-1069-A2D8-08002B30309D}"), Some(2));
+        assert_eq!(find(r"C:\Windows\System32"), None);
+        assert_eq!(position_of_same_path(std::iter::empty(), Path::new(r"C:\")), None);
     }
 
     #[test]
