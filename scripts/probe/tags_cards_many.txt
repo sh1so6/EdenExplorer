@@ -1,0 +1,24 @@
+# 7 tags as cards at 1117 wide (3 columns, 3 rows), tall dock, then split +
+# vertical tabs (2 columns) and the dock scrolled down.
+#   ./scripts/ui-probe.ps1 -Script scripts/probe/tags_cards_many.txt -Seed scripts/probe/seed_tags_many
+size 1117 717
+wait_ms 1500
+click 80 294
+move 700 200
+drag 700 474 700 224 10
+move 700 200
+wait_ms 1200
+shot out/tags_cards_many_0.png
+click 130 18
+move 700 200
+click 154 18
+move 700 200
+wait_ms 500
+shot out/tags_cards_many_1_vertical_split.png
+# Scroll the dock down.
+move 800 600
+wheel -400
+move 700 200
+wait_ms 300
+shot out/tags_cards_many_2_scrolled.png
+quit

@@ -1125,6 +1125,43 @@ mod tests {
                 scratch.join("dst").display().to_string(),
             ],
         };
+        // Many tags (card grid): the same three plus four more.
+        let more = [
+            (
+                "Docs",
+                [240, 200, 110, 255],
+                vec![r"C:\Users", r"C:\Windows\win.ini"],
+            ),
+            ("Fonts", [110, 220, 210, 255], vec![r"C:\Windows\Fonts"]),
+            (
+                "Programs",
+                [180, 180, 190, 255],
+                vec![
+                    r"C:\Program Files",
+                    r"C:\Program Files (x86)",
+                    r"C:\ProgramData",
+                ],
+            ),
+            (
+                "Windows tools with an even longer tag name for truncation",
+                [240, 140, 200, 255],
+                vec![r"C:\Windows\regedit.exe", r"C:\Windows\HelpPane.exe"],
+            ),
+        ];
+        let mut many = snapshot;
+        for (index, (name, color, items)) in more.into_iter().enumerate() {
+            many.groups.push(TagGroupSnapshot {
+                id: 4 + index as u64,
+                name: name.to_string(),
+                color,
+                items: items.into_iter().map(PathBuf::from).collect(),
+            });
+        }
+        many.next_group_id = 4 + many.groups.len() as u64;
+        let dir = probe_dir.join("seed_tags_many");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("tags.bin"), postcard::to_allocvec(&many).unwrap()).unwrap();
+
         let dir = probe_dir.join("seed_tags_drag");
         std::fs::create_dir_all(dir.join("favorites")).unwrap();
         std::fs::write(dir.join("tags.bin"), &tags_bin).unwrap();

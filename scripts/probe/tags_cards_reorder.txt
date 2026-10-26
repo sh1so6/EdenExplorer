@@ -1,0 +1,39 @@
+# Drag reorder inside tag cards, including the System card's scrolling list.
+#   ./scripts/ui-probe.ps1 -Script scripts/probe/tags_cards_reorder.txt -Seed scripts/probe/seed_tags
+size 1117 717
+wait_ms 1500
+click 80 294
+move 700 300
+wait_ms 1200
+# Projects card: drag "System32" below "notepad.exe"; shot while dragging.
+move 620 544
+down
+move 620 550
+move 620 560
+move 620 575
+move 620 585
+move 620 588
+wait_frames 3
+shot out/tags_cards_reorder_0_dragging.png
+up
+move 700 300
+wait_ms 300
+shot out/tags_cards_reorder_1_dropped.png
+# System card: scroll its list, then drag the top visible row down 3 rows.
+move 950 620
+wheel -60
+wait_ms 300
+move 900 562
+down
+move 900 568
+move 900 590
+move 900 610
+move 900 622
+move 900 625
+wait_frames 3
+shot out/tags_cards_reorder_2_dragging_scrolled.png
+up
+move 700 300
+wait_ms 300
+shot out/tags_cards_reorder_3_dropped_scrolled.png
+quit

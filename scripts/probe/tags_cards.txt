@@ -1,0 +1,61 @@
+# Tag groups as wrapping cards in the tags dock (1117 wide: 3 columns):
+# focus from the sidebar, list scroll, collapse, truncated name tooltip,
+# rename input, small dock, split + vertical tabs.
+#   ./scripts/ui-probe.ps1 -Script scripts/probe/tags_cards.txt -Seed scripts/probe/seed_tags
+size 1117 717
+wait_ms 1500
+# Open the dock focused on "Work".
+click 80 294
+move 700 300
+wait_ms 1200
+shot out/tags_cards_0_dock.png
+# Focus "System" from the sidebar: brief outline around its card.
+click 80 338
+move 700 300
+shot out/tags_cards_1_system_highlight.png
+wait_ms 1200
+# Scroll the System card's list (40 objects).
+move 950 620
+wheel -120
+move 700 300
+wait_ms 300
+shot out/tags_cards_2_system_list_scrolled.png
+# Hover the truncated "Projects…" name: full name tooltip.
+move 640 521
+wait_ms 800
+shot out/tags_cards_3_name_tooltip.png
+# Collapse "Work": only its header remains.
+click 286 520
+move 700 300
+wait_ms 400
+shot out/tags_cards_4_work_collapsed.png
+click 286 520
+move 700 300
+wait_ms 400
+# Rename "Projects…": the input fits the card.
+click 742 520
+move 700 300
+wait_ms 300
+shot out/tags_cards_5_rename.png
+key Escape
+wait_ms 200
+# Small dock: drag the separator down to the minimum.
+drag 700 474 700 700 10
+move 700 200
+wait_ms 300
+shot out/tags_cards_6_small_dock.png
+# Back to a taller dock.
+drag 700 611 700 374 10
+move 700 200
+wait_ms 300
+# Split view + dock.
+click 130 18
+move 700 200
+wait_ms 500
+shot out/tags_cards_7_split.png
+# Vertical tabs + split + dock.
+click 154 18
+move 700 200
+wait_ms 500
+shot out/tags_cards_8_vertical_split.png
+quit

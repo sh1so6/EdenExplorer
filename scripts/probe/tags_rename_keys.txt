@@ -12,7 +12,7 @@ click 330 124
 move 700 300
 wait_ms 300
 shot out/tags_rename_0_before.png
-click 1002 520
+click 461 520
 wait_ms 200
 key Delete
 text Renamed

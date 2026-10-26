@@ -1,0 +1,13 @@
+# Tag cards at a 700 px wide window.
+#   ./scripts/ui-probe.ps1 -Script scripts/probe/tags_cards_700.txt -Seed scripts/probe/seed_tags
+size 700 717
+wait_ms 1500
+click 80 294
+move 400 200
+wait_ms 1200
+shot out/tags_cards_700_0_dock.png
+# Focus "System" from the sidebar: scrolls to its card and outlines it.
+click 80 338
+move 400 200
+shot out/tags_cards_700_1_system.png
+quit

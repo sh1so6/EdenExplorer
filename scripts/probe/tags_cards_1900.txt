@@ -1,0 +1,13 @@
+# Tag cards at a 1900 px wide window, 7 tags (6 columns, wraps).
+#   ./scripts/ui-probe.ps1 -Script scripts/probe/tags_cards_1900.txt -Seed scripts/probe/seed_tags_many
+size 1900 717
+wait_ms 1500
+click 80 294
+move 400 200
+wait_ms 1200
+shot out/tags_cards_1900_0_dock.png
+# Focus "System" from the sidebar: scrolls to its card and outlines it.
+click 80 338
+move 400 200
+shot out/tags_cards_1900_1_system.png
+quit

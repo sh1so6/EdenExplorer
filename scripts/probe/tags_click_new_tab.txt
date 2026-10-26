@@ -10,7 +10,7 @@ move 700 300
 wait_ms 300
 shot out/tags_click_0_dock.png
 # Click "Windows" in the Work group: new tab "Windows", active.
-click 350 557
+click 330 544
 move 700 300
 wait_ms 600
 shot out/tags_click_1_new_tab.png
@@ -20,16 +20,16 @@ click 320 20
 move 700 300
 wait_ms 400
 shot out/tags_click_2_back_to_pc.png
-click 350 557
+click 330 544
 move 700 300
 wait_ms 600
 shot out/tags_click_3_activated.png
 # Right-click "Users": context menu with "Open in current tab".
-click 350 583 right
+click 330 562 right
 wait_ms 300
 shot out/tags_click_4_context.png
 # "Open in current tab": the Windows tab navigates to Users (still 2 tabs).
-click 410 601
+click 390 580
 move 700 300
 wait_ms 600
 shot out/tags_click_5_current_tab.png
