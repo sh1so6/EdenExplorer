@@ -55,6 +55,38 @@ fn vertical_tab_reorder_key() -> egui::Id {
     egui::Id::new("eden_vertical_tab_reorder_drag")
 }
 
+/// Egui temp-memory key holding the not yet used part of the mouse-wheel input over the
+/// vertical rail (in tab steps, signed like the wheel delta). Absent when nothing is pending.
+fn vertical_tab_wheel_key() -> egui::Id {
+    egui::Id::new("eden_vertical_tab_wheel_accum")
+}
+
+/// Adds one wheel event's vertical `delta` to the pending `accum` (both in tab steps, positive
+/// = wheel up) and returns the whole steps to take now plus the remainder to keep.
+///
+/// A line or a page is one step; touchpad points count one step per `row_height`. Turning
+/// the wheel the other way drops the remainder of the previous direction.
+fn wheel_steps(accum: f32, delta: f32, unit: egui::MouseWheelUnit, row_height: f32) -> (i32, f32) {
+    let amount = match unit {
+        egui::MouseWheelUnit::Line | egui::MouseWheelUnit::Page => delta,
+        egui::MouseWheelUnit::Point => delta / row_height.max(1.0),
+    };
+    if !amount.is_finite() || amount == 0.0 {
+        return (0, accum);
+    }
+    let accum = if accum * amount < 0.0 { 0.0 } else { accum };
+    let total = accum + amount;
+    let steps = total.trunc();
+    (steps as i32, total - steps)
+}
+
+/// Index of the tab a wheel turn of `steps` (positive = wheel up = towards the first tab)
+/// activates, starting at `active_idx` and clamped to `0..len` (no wrap-around).
+fn wheel_target_index(active_idx: usize, steps: i32, len: usize) -> usize {
+    let last = len.saturating_sub(1) as i64;
+    (active_idx as i64 - steps as i64).clamp(0, last) as usize
+}
+
 /// Insertion slot (`0..=row_rects.len()`, in the current tab order) for a dragged tab whose
 /// pointer is at `pointer_y`: before the first row whose vertical midpoint lies below it.
 fn reorder_insert_slot(pointer_y: f32, row_rects: &[egui::Rect]) -> usize {
@@ -438,6 +470,10 @@ fn vertical_tabs_border_stroke(palette: &ThemePalette) -> egui::Stroke {
 /// connects to the content it owns. `draw_left_border` adds a left edge; it is off when the
 /// rail sits directly against the sidebar border.
 ///
+/// The mouse wheel over the rail switches tabs (down = next, up = previous, no wrap-around)
+/// instead of scrolling the list; the list follows the active tab and keeps a draggable
+/// scroll bar. Ctrl / Shift wheel and wheel input during a drag are left alone.
+///
 /// Returns the same `TabsAction` as the horizontal strip (minus scrolling, which the
 /// panel's own `ScrollArea` handles) so both modes share `handle_tabs_action`.
 pub fn draw_vertical_tabs(
@@ -522,10 +558,12 @@ pub fn draw_vertical_tabs(
             egui::ScrollArea::vertical()
                 .id_salt("vertical_tabs_scroll")
                 .auto_shrink([false, false])
-                // Dragging a row reorders tabs; it must never scroll the list.
+                // Dragging a row reorders tabs and the wheel switches tabs (see
+                // `handle_vertical_tab_wheel`); neither may scroll the list.
                 .scroll_source(egui::scroll_area::ScrollSource {
+                    scroll_bar: true,
                     drag: egui::scroll_area::DragScroll::Never,
-                    ..Default::default()
+                    mouse_wheel: false,
                 })
                 .show(ui, |ui| {
                     ui.spacing_mut().item_spacing.y = 2.0;
@@ -609,6 +647,19 @@ pub fn draw_vertical_tabs(
         },
     );
 
+    if action.activate.is_none() {
+        let wheel_enabled = reorder_drag.is_none() && !drag_active;
+        handle_vertical_tab_wheel(
+            ui,
+            tabs,
+            active_id,
+            panel_rect,
+            row_height,
+            wheel_enabled,
+            &mut action,
+        );
+    }
+
     if reorder_drag.is_some() {
         if reorder_released {
             ui.data_mut(|d| d.remove::<u64>(reorder_key));
@@ -639,6 +690,63 @@ pub fn draw_vertical_tabs(
 
     action.move_files_to_tab_dir = tab_drop_target;
     action
+}
+
+/// Turns mouse-wheel events over the vertical rail (`panel_rect`) into `action.activate`
+/// of the next / previous tab. The raw events are used (not the smoothed scroll delta) so
+/// one notch is exactly one tab; partial input carries over in temp memory.
+fn handle_vertical_tab_wheel(
+    ui: &egui::Ui,
+    tabs: &[TabInfo],
+    active_id: u64,
+    panel_rect: egui::Rect,
+    row_height: f32,
+    enabled: bool,
+    action: &mut TabsAction,
+) {
+    let wheel_key = vertical_tab_wheel_key();
+    // Layer-aware, so a popup or context menu over the rail keeps its wheel input.
+    if !enabled || !ui.rect_contains_pointer(panel_rect) {
+        ui.data_mut(|d| d.remove::<f32>(wheel_key));
+        return;
+    }
+    let mut accum: f32 = ui.data(|d| d.get_temp(wheel_key)).unwrap_or(0.0);
+    let mut steps = 0i32;
+    ui.input(|i| {
+        for event in &i.events {
+            let egui::Event::MouseWheel {
+                unit,
+                delta,
+                modifiers,
+                ..
+            } = event
+            else {
+                continue;
+            };
+            // Ctrl / Cmd wheel zooms and Shift wheel scrolls sideways; leave those alone.
+            if modifiers.command || modifiers.ctrl || modifiers.shift {
+                continue;
+            }
+            let (event_steps, rest) = wheel_steps(accum, delta.y, *unit, row_height);
+            steps = steps.saturating_add(event_steps);
+            accum = rest;
+        }
+    });
+    if accum == 0.0 {
+        ui.data_mut(|d| d.remove::<f32>(wheel_key));
+    } else {
+        ui.data_mut(|d| d.insert_temp(wheel_key, accum));
+    }
+    if steps == 0 {
+        return;
+    }
+    let Some(active_idx) = tabs.iter().position(|tab| tab.id == active_id) else {
+        return;
+    };
+    let target = &tabs[wheel_target_index(active_idx, steps, tabs.len())];
+    if target.id != active_id {
+        action.activate = Some(target.id);
+    }
 }
 
 /// Per-frame work of a vertical tab reorder drag, run inside the rail's `ScrollArea` after
@@ -1457,6 +1565,45 @@ fn tab_nav_button(
 mod tests {
     use super::*;
     use crate::gui::theme::{ThemeMode, get_default_palette};
+
+    #[test]
+    fn wheel_steps_counts_lines_pages_and_points() {
+        use egui::MouseWheelUnit::{Line, Page, Point};
+        // One notch is one step; the sign follows the wheel (positive = up).
+        assert_eq!(wheel_steps(0.0, 1.0, Line, 30.0), (1, 0.0));
+        assert_eq!(wheel_steps(0.0, -1.0, Line, 30.0), (-1, 0.0));
+        assert_eq!(wheel_steps(0.0, -3.0, Line, 30.0), (-3, 0.0));
+        assert_eq!(wheel_steps(0.0, 2.0, Page, 30.0), (2, 0.0));
+        // High-resolution wheels: fractions add up across events.
+        assert_eq!(wheel_steps(0.0, -0.5, Line, 30.0), (0, -0.5));
+        assert_eq!(wheel_steps(-0.5, -0.5, Line, 30.0), (-1, 0.0));
+        // Touchpad points: one step per row height, the rest is kept.
+        assert_eq!(wheel_steps(0.0, 15.0, Point, 30.0), (0, 0.5));
+        assert_eq!(wheel_steps(0.5, 30.0, Point, 30.0), (1, 0.5));
+        assert_eq!(wheel_steps(0.0, -75.0, Point, 30.0), (-2, -0.5));
+        // Reversing drops the remainder of the other direction.
+        assert_eq!(wheel_steps(0.9, -0.5, Line, 30.0), (0, -0.5));
+        assert_eq!(wheel_steps(-0.9, 1.0, Line, 30.0), (1, 0.0));
+        // No input keeps the remainder; junk input is ignored.
+        assert_eq!(wheel_steps(0.25, 0.0, Line, 30.0), (0, 0.25));
+        assert_eq!(wheel_steps(0.25, f32::NAN, Point, 30.0), (0, 0.25));
+        // A degenerate row height does not divide by zero.
+        assert_eq!(wheel_steps(0.0, 2.0, Point, 0.0), (2, 0.0));
+    }
+
+    #[test]
+    fn wheel_target_index_moves_and_clamps() {
+        // Wheel down (negative steps) goes to the next tab, up to the previous one.
+        assert_eq!(wheel_target_index(2, -1, 5), 3);
+        assert_eq!(wheel_target_index(2, 1, 5), 1);
+        assert_eq!(wheel_target_index(2, -2, 5), 4);
+        // Clamped at both ends, no wrap-around.
+        assert_eq!(wheel_target_index(4, -1, 5), 4);
+        assert_eq!(wheel_target_index(0, 1, 5), 0);
+        assert_eq!(wheel_target_index(1, i32::MIN, 5), 4);
+        assert_eq!(wheel_target_index(1, i32::MAX, 5), 0);
+        assert_eq!(wheel_target_index(0, -1, 1), 0);
+    }
 
     #[test]
     fn reorder_index_maps_slots_to_final_positions() {
